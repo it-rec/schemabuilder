@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(npx react-scripts test --watchAll=false)",
+      "Bash(pip install:*)",
+      "Bash(python generate_test_docs.py:*)",
+      "Bash(python -m uvicorn:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "Bash(python:*)",
+      "Bash(ping:*)",
+      "Bash(powershell.exe -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; npx react-scripts build 2>&1\")",
+      "Bash(powershell.exe -Command \"Get-ChildItem ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend\\\\node_modules\\\\@carbon\\\\icons-react\\\\es\\\\index.js'' | Select-Object FullName\")",
+      "Bash(powershell.exe -Command \"Select-String -Path ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend\\\\node_modules\\\\@carbon\\\\icons-react\\\\es\\\\index.js'' -Pattern ''Presentation'' -AllMatches | ForEach-Object { $_Matches.Value } | Sort-Object -Unique\")",
+      "Bash(powershell.exe -NoProfile -Command \"node -e \"\"const icons = require\\(''@carbon/icons-react''\\); const matches = Object.keys\\(icons\\).filter\\(k => k.toLowerCase\\(\\).includes\\(''present''\\)\\); console.log\\(matches.join\\(''\\\\n''\\)\\);\"\"\")",
+      "Bash(powershell.exe -NoProfile -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; node -e \"\"const icons = require\\(''@carbon/react/icons''\\); const matches = Object.keys\\(icons\\).filter\\(k => k.toLowerCase\\(\\).includes\\(''present''\\)\\); console.log\\(matches.join\\(''\\\\n''\\)\\);\"\"\")",
+      "Bash(powershell.exe -NoProfile -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; node -e \"\"const icons = require\\(''@carbon/react/icons''\\); const matches = Object.keys\\(icons\\).filter\\(k => k.toLowerCase\\(\\).includes\\(''wordprocessor''\\)\\); console.log\\(matches.join\\(''\\\\n''\\)\\);\"\"\")",
+      "Bash(powershell.exe -NoProfile -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; npx react-scripts build 2>&1\")"
+    ]
+  }
+}
