@@ -125,6 +125,7 @@ export default function DocumentViewer({
     <div className="document-viewer" ref={containerRef}>
       <div className="document-viewer__toolbar">
         <IconButton
+          align={"left"}
           label="Previous page"
           kind="ghost"
           size="sm"
@@ -137,6 +138,7 @@ export default function DocumentViewer({
           Page {currentPage} of {numPages}
         </span>
         <IconButton
+          align={"right"}
           label="Next page"
           kind="ghost"
           size="sm"

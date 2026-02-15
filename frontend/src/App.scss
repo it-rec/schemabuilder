@@ -8,8 +8,10 @@
 @use "@carbon/styles/scss/type";
 
 .app-content {
-  padding-top: 3rem; // Account for Carbon header
-  height: 100vh;
+  padding-top: 0;
+  padding-left: 0;
+  padding-right: 0;
+  height: calc(100vh - 3rem);
   box-sizing: border-box;
 }
 
