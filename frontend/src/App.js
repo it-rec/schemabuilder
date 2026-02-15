@@ -28,13 +28,19 @@ export default function App() {
   // Load document data when selection changes
   useEffect(() => {
     if (!selectedDocId) return;
+    const controller = new AbortController();
     setLoading(true);
     setDocumentData(null);
     setHighlightedEntryId(null);
-    fetchDocument(selectedDocId)
+    fetchDocument(selectedDocId, controller.signal)
       .then(setDocumentData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        if (err.name !== "AbortError") console.error(err);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
   }, [selectedDocId]);
 
   const handleSelect = useCallback((id) => {

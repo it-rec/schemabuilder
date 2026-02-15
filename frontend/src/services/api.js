@@ -6,8 +6,8 @@ export async function fetchDocuments() {
   return res.json();
 }
 
-export async function fetchDocument(docId) {
-  const res = await fetch(`${API_BASE}/api/documents/${docId}`);
+export async function fetchDocument(docId, signal) {
+  const res = await fetch(`${API_BASE}/api/documents/${docId}`, { signal });
   if (!res.ok) throw new Error("Failed to fetch document");
   return res.json();
 }

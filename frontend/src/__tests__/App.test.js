@@ -46,6 +46,6 @@ test("loads and displays document list", async () => {
 test("fetches first document on load", async () => {
   render(<App />);
   await waitFor(() => {
-    expect(api.fetchDocument).toHaveBeenCalledWith("abc123");
+    expect(api.fetchDocument).toHaveBeenCalledWith("abc123", expect.any(AbortSignal));
   });
 });
