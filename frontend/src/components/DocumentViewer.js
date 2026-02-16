@@ -6,7 +6,7 @@ import { getPageImageUrl } from "../services/api";
 export default function DocumentViewer({
   docId,
   documentData,
-  highlightedEntryId,
+  highlightedField,
   loading,
 }) {
   const [currentPage, setCurrentPage] = useState(1);
@@ -21,16 +21,13 @@ export default function DocumentViewer({
     setImageDimensions(null);
   }, [docId]);
 
-  // Scroll highlighted entry's page into view
+  // Navigate to the highlighted field's page
   useEffect(() => {
-    if (highlightedEntryId == null || !documentData) return;
-    const entry = documentData.text_entries.find(
-      (e) => e.id === highlightedEntryId
-    );
-    if (entry && entry.page > 0 && entry.page !== currentPage) {
-      setCurrentPage(entry.page);
+    if (!highlightedField || !highlightedField.page) return;
+    if (highlightedField.page !== currentPage) {
+      setCurrentPage(highlightedField.page);
     }
-  }, [highlightedEntryId, documentData, currentPage]);
+  }, [highlightedField, currentPage]);
 
   function handleImageLoad(e) {
     setImageDimensions({
@@ -41,26 +38,20 @@ export default function DocumentViewer({
     });
   }
 
-  // Get highlight overlays for the current page
+  // Get highlight overlay for the currently hovered field
   function getHighlights() {
-    if (
-      highlightedEntryId == null ||
-      !documentData ||
-      !imageDimensions
-    )
+    if (!highlightedField || !highlightedField.bbox || !imageDimensions) {
       return null;
+    }
 
-    const entry = documentData.text_entries.find(
-      (e) => e.id === highlightedEntryId
-    );
-    if (!entry || !entry.bbox || entry.page !== currentPage) return null;
+    if (highlightedField.page !== currentPage) return null;
 
-    const { bbox } = entry;
+    const { bbox } = highlightedField;
     const { displayWidth, displayHeight } = imageDimensions;
 
     // Get page dimensions from document data or fall back to image natural size
     const pageDims =
-      documentData.page_dimensions?.[currentPage] || imageDimensions;
+      documentData?.page_dimensions?.[currentPage] || imageDimensions;
     const pageWidth = pageDims.width;
     const pageHeight = pageDims.height;
 
@@ -101,6 +92,14 @@ export default function DocumentViewer({
         }}
       />
     );
+  }
+
+  // Show all matched fields as subtle overlays on the current page
+  function getFieldOverlays() {
+    if (!documentData || !imageDimensions) return null;
+
+    // We don't render persistent overlays here anymore — only the hovered highlight
+    return null;
   }
 
   if (loading) {
@@ -157,6 +156,7 @@ export default function DocumentViewer({
             className="document-viewer__image"
           />
           {getHighlights()}
+          {getFieldOverlays()}
         </div>
       </div>
     </div>

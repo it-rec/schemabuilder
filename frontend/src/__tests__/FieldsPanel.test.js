@@ -1,0 +1,120 @@
+import React from "react";
+import { render, screen, fireEvent } from "@testing-library/react";
+import FieldsPanel from "../components/FieldsPanel";
+
+const mockExtraction = {
+  document_type: "Invoice",
+  document_description: "An invoice document.",
+  fields: [
+    {
+      name: "invoice_id",
+      description: "unique identifier",
+      extracted_value: "INV-2024-001",
+      confidence: 0.9,
+      matched_entry_id: 1,
+      page: 1,
+      bbox: { l: 10, t: 20, r: 100, b: 30 },
+      examples: ["INV-2024-001"],
+    },
+    {
+      name: "invoice_date",
+      description: "the invoice creation date",
+      extracted_value: null,
+      confidence: 0,
+      matched_entry_id: null,
+      page: null,
+      bbox: null,
+      examples: ["2024-02-04"],
+    },
+    {
+      name: "line_items",
+      type: "array",
+      description: "Information about each product or service.",
+      extracted_value: null,
+      confidence: 0,
+      matched_entry_id: null,
+      page: null,
+      bbox: null,
+      examples: [],
+      fields: [{ name: "amount", description: "total amount" }],
+      items: [],
+    },
+  ],
+};
+
+test("renders document type as title", () => {
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />
+  );
+  expect(screen.getByText("Invoice")).toBeInTheDocument();
+});
+
+test("shows field count badge", () => {
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />
+  );
+  expect(screen.getByText("1/3 found")).toBeInTheDocument();
+});
+
+test("renders all fields", () => {
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />
+  );
+  expect(screen.getByText("invoice id")).toBeInTheDocument();
+  expect(screen.getByText("invoice date")).toBeInTheDocument();
+  expect(screen.getByText("line items")).toBeInTheDocument();
+});
+
+test("shows extracted value for matched fields", () => {
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />
+  );
+  expect(screen.getByText("INV-2024-001")).toBeInTheDocument();
+});
+
+test("shows Not found for unmatched fields", () => {
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />
+  );
+  const notFoundElements = screen.getAllByText("Not found");
+  expect(notFoundElements.length).toBeGreaterThanOrEqual(1);
+});
+
+test("calls onHoverField on mouse enter for matched field", () => {
+  const onHover = jest.fn();
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={onHover} loading={false} />
+  );
+  fireEvent.mouseEnter(screen.getByTestId("field-invoice_id"));
+  expect(onHover).toHaveBeenCalledWith(mockExtraction.fields[0]);
+});
+
+test("calls onHoverField with null on mouse leave", () => {
+  const onHover = jest.fn();
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={onHover} loading={false} />
+  );
+  fireEvent.mouseLeave(screen.getByTestId("field-invoice_id"));
+  expect(onHover).toHaveBeenCalledWith(null);
+});
+
+test("shows loading message when loading", () => {
+  render(
+    <FieldsPanel extraction={null} onHoverField={() => {}} loading={true} />
+  );
+  expect(screen.getByText("Extracting fields...")).toBeInTheDocument();
+});
+
+test("shows empty state when no extraction", () => {
+  render(
+    <FieldsPanel extraction={null} onHoverField={() => {}} loading={false} />
+  );
+  expect(screen.getByText("Select a document definition to extract fields.")).toBeInTheDocument();
+});
+
+test("shows page badge for matched field", () => {
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />
+  );
+  expect(screen.getByText("p.1")).toBeInTheDocument();
+});

@@ -1,9 +1,20 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { Theme, Header, HeaderName, Content } from "@carbon/react";
+import {
+  Theme,
+  Header,
+  HeaderName,
+  Content,
+  Dropdown,
+} from "@carbon/react";
 import DocumentList from "./components/DocumentList";
 import DocumentViewer from "./components/DocumentViewer";
-import TextEntriesPanel from "./components/TextEntriesPanel";
-import { fetchDocuments, fetchDocument } from "./services/api";
+import FieldsPanel from "./components/FieldsPanel";
+import {
+  fetchDocuments,
+  fetchDocument,
+  fetchDefinitions,
+  extractFields,
+} from "./services/api";
 import "./App.scss";
 
 export default function App() {
@@ -11,15 +22,32 @@ export default function App() {
   const [selectedDocId, setSelectedDocId] = useState(null);
   const [documentData, setDocumentData] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [highlightedEntryId, setHighlightedEntryId] = useState(null);
 
-  // Load document list on mount
+  // Document definitions
+  const [definitions, setDefinitions] = useState([]);
+  const [selectedDefId, setSelectedDefId] = useState(null);
+  const [extraction, setExtraction] = useState(null);
+  const [extracting, setExtracting] = useState(false);
+
+  // Highlighted field (for document overlay)
+  const [highlightedField, setHighlightedField] = useState(null);
+
+  // Load document list and definitions on mount
   useEffect(() => {
     fetchDocuments()
       .then((docs) => {
         setDocuments(docs);
         if (docs.length > 0) {
           setSelectedDocId(docs[0].id);
+        }
+      })
+      .catch(console.error);
+
+    fetchDefinitions()
+      .then((defs) => {
+        setDefinitions(defs);
+        if (defs.length > 0) {
+          setSelectedDefId(defs[0].id);
         }
       })
       .catch(console.error);
@@ -30,29 +58,57 @@ export default function App() {
     if (!selectedDocId) return;
     setLoading(true);
     setDocumentData(null);
-    setHighlightedEntryId(null);
+    setExtraction(null);
+    setHighlightedField(null);
     fetchDocument(selectedDocId)
       .then(setDocumentData)
       .catch(console.error)
       .finally(() => setLoading(false));
   }, [selectedDocId]);
 
+  // Extract fields when document + definition are both available
+  useEffect(() => {
+    if (!selectedDocId || !selectedDefId || !documentData) return;
+    setExtracting(true);
+    setExtraction(null);
+    extractFields(selectedDocId, selectedDefId)
+      .then(setExtraction)
+      .catch(console.error)
+      .finally(() => setExtracting(false));
+  }, [selectedDocId, selectedDefId, documentData]);
+
   const handleSelect = useCallback((id) => {
     setSelectedDocId(id);
   }, []);
 
-  const handleHover = useCallback((entryId) => {
-    setHighlightedEntryId(entryId);
+  const handleHoverField = useCallback((field) => {
+    setHighlightedField(field);
+  }, []);
+
+  const handleDefChange = useCallback(({ selectedItem }) => {
+    setSelectedDefId(selectedItem?.id || null);
   }, []);
 
   return (
     <Theme theme="g10">
       <Header aria-label="Document Viewer">
-        <HeaderName prefix="IBM">Document Viewer</HeaderName>
+        <HeaderName prefix="IBM">Schema Builder</HeaderName>
       </Header>
       <Content className="app-content">
         <div className="app-layout">
           <aside className="app-layout__sidebar" data-testid="document-list-panel">
+            <div className="definition-selector">
+              <Dropdown
+                id="definition-selector"
+                titleText="Document class"
+                label="Select a definition..."
+                items={definitions}
+                itemToString={(item) => item?.document_type || ""}
+                selectedItem={definitions.find((d) => d.id === selectedDefId) || null}
+                onChange={handleDefChange}
+                size="sm"
+              />
+            </div>
             <DocumentList
               documents={documents}
               selectedId={selectedDocId}
@@ -63,15 +119,15 @@ export default function App() {
             <DocumentViewer
               docId={selectedDocId}
               documentData={documentData}
-              highlightedEntryId={highlightedEntryId}
+              highlightedField={highlightedField}
               loading={loading}
             />
           </main>
-          <aside className="app-layout__panel" data-testid="text-entries-panel">
-            <TextEntriesPanel
-              entries={documentData?.text_entries}
-              onHoverEntry={handleHover}
-              loading={loading}
+          <aside className="app-layout__panel" data-testid="fields-panel">
+            <FieldsPanel
+              extraction={extraction}
+              onHoverField={handleHoverField}
+              loading={loading || extracting}
             />
           </aside>
         </div>
