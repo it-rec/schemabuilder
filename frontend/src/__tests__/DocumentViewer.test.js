@@ -25,14 +25,14 @@ const mockDocData = {
 
 test("shows loading state", () => {
   render(
-    <DocumentViewer docId="abc" documentData={null} highlightedEntryId={null} loading={true} />
+    <DocumentViewer docId="abc" documentData={null} highlightedField={null} loading={true} />
   );
   expect(screen.getByText("Loading document...")).toBeInTheDocument();
 });
 
 test("shows empty state when no document selected", () => {
   render(
-    <DocumentViewer docId={null} documentData={null} highlightedEntryId={null} loading={false} />
+    <DocumentViewer docId={null} documentData={null} highlightedField={null} loading={false} />
   );
   expect(screen.getByText("Select a document to view.")).toBeInTheDocument();
 });
@@ -42,7 +42,7 @@ test("displays page image and pagination", () => {
     <DocumentViewer
       docId="abc"
       documentData={mockDocData}
-      highlightedEntryId={null}
+      highlightedField={null}
       loading={false}
     />
   );
@@ -54,14 +54,17 @@ test("displays page image and pagination", () => {
   );
 });
 
-test("shows highlight overlay when entry is highlighted", () => {
-  // We need to simulate image loading for dimensions to be set
-  // This test checks that the highlight element renders when conditions are met
-  const { container } = render(
+test("renders without error when a field is highlighted", () => {
+  const highlightedField = {
+    name: "invoice_id",
+    page: 1,
+    bbox: { l: 50, t: 700, r: 300, b: 680, coord_origin: "BOTTOMLEFT" },
+  };
+  render(
     <DocumentViewer
       docId="abc"
       documentData={mockDocData}
-      highlightedEntryId={0}
+      highlightedField={highlightedField}
       loading={false}
     />
   );
