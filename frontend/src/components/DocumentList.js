@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import {
   Search,
   StructuredListWrapper,
@@ -24,9 +24,15 @@ function formatSize(bytes) {
 export default function DocumentList({ documents, selectedId, onSelect }) {
   const [query, setQuery] = useState("");
 
-  const filtered = documents.filter((doc) =>
-    doc.filename.toLowerCase().includes(query.toLowerCase())
-  );
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return documents;
+    return documents.filter((doc) =>
+      doc.filename.toLowerCase().includes(q)
+    );
+  }, [documents, query]);
+
+  const handleQueryChange = useCallback((e) => setQuery(e.target.value), []);
 
   return (
     <div className="document-list">
@@ -35,7 +41,7 @@ export default function DocumentList({ documents, selectedId, onSelect }) {
         placeholder="Search documents..."
         labelText="Search documents"
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={handleQueryChange}
       />
       <StructuredListWrapper selection className="document-list__items">
         <StructuredListHead>

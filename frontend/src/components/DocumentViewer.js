@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { IconButton, Loading } from "@carbon/react";
 import { ChevronLeft, ChevronRight } from "@carbon/react/icons";
 import { getPageImageUrl } from "../services/api";
@@ -29,27 +29,57 @@ export default function DocumentViewer({
     }
   }, [highlightedField, currentPage]);
 
-  function handleImageLoad(e) {
+  // Pre-fetch adjacent pages so navigation is instant. The browser caches the
+  // PNG, and the server memoizes the rendered bytes, so this also warms both.
+  useEffect(() => {
+    if (!docId || numPages <= 1) return;
+    const adjacent = [currentPage - 1, currentPage + 1].filter(
+      (p) => p >= 1 && p <= numPages && p !== currentPage,
+    );
+    const imgs = adjacent.map((p) => {
+      const img = new Image();
+      img.src = getPageImageUrl(docId, p);
+      return img;
+    });
+    return () => {
+      // Drop refs so the browser is free to reuse the connections.
+      imgs.forEach((img) => {
+        img.src = "";
+      });
+    };
+  }, [docId, currentPage, numPages]);
+
+  const handleImageLoad = useCallback((e) => {
     setImageDimensions({
       width: e.target.naturalWidth,
       height: e.target.naturalHeight,
       displayWidth: e.target.clientWidth,
       displayHeight: e.target.clientHeight,
     });
-  }
+  }, []);
 
-  // Get highlight overlay for the currently hovered field
-  function getHighlights() {
+  const handleImageError = useCallback(() => setImageDimensions(null), []);
+
+  const handlePrev = useCallback(
+    () => setCurrentPage((p) => Math.max(1, p - 1)),
+    [],
+  );
+  const handleNext = useCallback(
+    () => setCurrentPage((p) => Math.min(numPages, p + 1)),
+    [numPages],
+  );
+
+  // Highlight overlay for the currently hovered field. Memoized so an unrelated
+  // state change (e.g. page hover elsewhere) doesn't recompute it.
+  const highlightStyle = useMemo(() => {
     if (!highlightedField || !highlightedField.bbox || !imageDimensions) {
       return null;
     }
-
     if (highlightedField.page !== currentPage) return null;
 
     const { bbox } = highlightedField;
     const { displayWidth, displayHeight } = imageDimensions;
 
-    // Get page dimensions from document data or fall back to image natural size
     const pageDims =
       documentData?.page_dimensions?.[currentPage] || imageDimensions;
     const pageWidth = pageDims.width;
@@ -58,16 +88,13 @@ export default function DocumentViewer({
     const scaleX = displayWidth / pageWidth;
     const scaleY = displayHeight / pageHeight;
 
-    // Docling bbox can be bottom-left origin or top-left origin
     const isBottomOrigin =
       bbox.coord_origin === "BOTTOMLEFT" || bbox.t > bbox.b;
 
-    let top, left, width, height;
-    left = bbox.l * scaleX;
-    width = (bbox.r - bbox.l) * scaleX;
-
+    const left = bbox.l * scaleX;
+    const width = (bbox.r - bbox.l) * scaleX;
+    let top, height;
     if (isBottomOrigin) {
-      // Convert from bottom-left origin to top-left
       top = (pageHeight - bbox.t) * scaleY;
       height = (bbox.t - bbox.b) * scaleY;
     } else {
@@ -75,32 +102,23 @@ export default function DocumentViewer({
       height = (bbox.b - bbox.t) * scaleY;
     }
 
-    return (
-      <div
-        className="document-viewer__highlight"
-        data-testid="highlight-overlay"
-        style={{
-          position: "absolute",
-          left: `${left}px`,
-          top: `${top}px`,
-          width: `${width}px`,
-          height: `${height}px`,
-          backgroundColor: "rgba(15, 98, 254, 0.25)",
-          border: "2px solid #0f62fe",
-          borderRadius: "2px",
-          pointerEvents: "none",
-        }}
-      />
-    );
-  }
+    return {
+      position: "absolute",
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+      backgroundColor: "rgba(15, 98, 254, 0.25)",
+      border: "2px solid #0f62fe",
+      borderRadius: "2px",
+      pointerEvents: "none",
+    };
+  }, [highlightedField, imageDimensions, documentData, currentPage]);
 
-  // Show all matched fields as subtle overlays on the current page
-  function getFieldOverlays() {
-    if (!documentData || !imageDimensions) return null;
-
-    // We don't render persistent overlays here anymore — only the hovered highlight
-    return null;
-  }
+  const pageImageUrl = useMemo(
+    () => (docId ? getPageImageUrl(docId, currentPage) : null),
+    [docId, currentPage],
+  );
 
   if (loading) {
     return (
@@ -118,8 +136,6 @@ export default function DocumentViewer({
     );
   }
 
-  const pageImageUrl = getPageImageUrl(docId, currentPage);
-
   return (
     <div className="document-viewer" ref={containerRef}>
       <div className="document-viewer__toolbar">
@@ -128,7 +144,7 @@ export default function DocumentViewer({
           kind="ghost"
           size="sm"
           disabled={currentPage <= 1}
-          onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+          onClick={handlePrev}
         >
           <ChevronLeft />
         </IconButton>
@@ -140,7 +156,7 @@ export default function DocumentViewer({
           kind="ghost"
           size="sm"
           disabled={currentPage >= numPages}
-          onClick={() => setCurrentPage((p) => Math.min(numPages, p + 1))}
+          onClick={handleNext}
         >
           <ChevronRight />
         </IconButton>
@@ -152,11 +168,16 @@ export default function DocumentViewer({
             src={pageImageUrl}
             alt={`Page ${currentPage}`}
             onLoad={handleImageLoad}
-            onError={() => setImageDimensions(null)}
+            onError={handleImageError}
             className="document-viewer__image"
           />
-          {getHighlights()}
-          {getFieldOverlays()}
+          {highlightStyle && (
+            <div
+              className="document-viewer__highlight"
+              data-testid="highlight-overlay"
+              style={highlightStyle}
+            />
+          )}
         </div>
       </div>
     </div>
