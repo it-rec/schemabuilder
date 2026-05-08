@@ -54,6 +54,12 @@ _doc_path_cache: dict = {}
 # lazily and reused across extract calls for the same definition snapshot.
 _signature_cache: dict = {}
 
+# Module-level Docling converter. Construction loads layout/OCR models which is
+# slow; reuse a single instance across documents. Concurrent calls are serialized
+# by `_text_lock` (extraction happens inside it), so sharing is safe.
+_text_converter = None
+_text_converter_lock = threading.Lock()
+
 
 def _file_signature(filepath: Path) -> tuple:
     """Stable identity for a file's current contents. Used as part of cache
@@ -164,20 +170,32 @@ def _render_single_page(pdf_path: str, page_no: int) -> Optional[bytes]:
         pdf_doc.close()
 
 
+def _get_text_converter():
+    """Lazily build (and reuse) the Docling DocumentConverter."""
+    global _text_converter
+    if _text_converter is not None:
+        return _text_converter
+    with _text_converter_lock:
+        if _text_converter is not None:
+            return _text_converter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+        pdf_pipeline_opts = PdfPipelineOptions()
+        pdf_pipeline_opts.generate_page_images = False
+        pdf_pipeline_opts.images_scale = 2.0
+
+        _text_converter = DocumentConverter(
+            format_options={
+                "pdf": PdfFormatOption(pipeline_options=pdf_pipeline_opts),
+            }
+        )
+    return _text_converter
+
+
 def _extract_text(filepath: Path) -> tuple[list, dict]:
     """Extract text entries using Docling. Returns (text_entries, page_dimensions)."""
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-
-    pdf_pipeline_opts = PdfPipelineOptions()
-    pdf_pipeline_opts.generate_page_images = False
-    pdf_pipeline_opts.images_scale = 2.0
-
-    converter = DocumentConverter(
-        format_options={
-            "pdf": PdfFormatOption(pipeline_options=pdf_pipeline_opts),
-        }
-    )
+    converter = _get_text_converter()
     result = converter.convert(str(filepath))
     doc = result.document
 
@@ -262,6 +280,10 @@ def _get_or_render(filepath: Path) -> dict:
             "pdf_path": str(pdf_path) if pdf_path else None,
             "page_images": {},
             "_sig": sig,
+            # Per-doc lock so two concurrent requests for the same page don't
+            # both run pdfium and rasterize the same bitmap. Different docs
+            # still render in parallel.
+            "_render_lock": threading.Lock(),
         }
     return _render_cache[doc_id]
 
@@ -276,10 +298,14 @@ def _render_page(filepath: Path, page_no: int) -> Optional[bytes]:
     if not pdf_path:
         return None
 
-    png_bytes = _render_single_page(pdf_path, page_no)
-    if png_bytes is not None:
-        page_images[page_no] = png_bytes
-    return png_bytes
+    with data["_render_lock"]:
+        # Re-check under the lock: another caller may have just rendered it.
+        if page_no in page_images:
+            return page_images[page_no]
+        png_bytes = _render_single_page(pdf_path, page_no)
+        if png_bytes is not None:
+            page_images[page_no] = png_bytes
+        return png_bytes
 
 
 def _get_or_extract_text(filepath: Path) -> dict:
