@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -26,22 +27,93 @@ TEST_DOCS_DIR = Path(__file__).parent / "test_documents"
 DEFINITIONS_DIR = Path(__file__).parent / "definitions"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
 
-# In-memory cache for processed documents
-_document_cache: dict = {}
+# Render cache: fast, populated eagerly on doc selection (pypdfium2 only).
+_render_cache: dict = {}
+# Text-extraction cache: slow, populated lazily on first extraction (Docling).
+_text_cache: dict = {}
+# Cache for DOCX/PPTX → PDF conversions
+_pdf_conversion_cache: dict = {}
+_pdf_temp_dir = tempfile.mkdtemp(prefix="schemabuilder_")
+
+
+def _convert_to_pdf(filepath: Path) -> Optional[Path]:
+    """Convert DOCX/PPTX to PDF using MS Office COM automation. Results are cached."""
+    cache_key = str(filepath)
+    if cache_key in _pdf_conversion_cache:
+        cached = Path(_pdf_conversion_cache[cache_key])
+        if cached.exists():
+            return cached
+
+    import win32com.client
+
+    ext = filepath.suffix.lower()
+    abs_path = str(filepath.resolve())
+    pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}.pdf"
+
+    if ext == ".docx":
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        try:
+            doc = word.Documents.Open(abs_path)
+            doc.SaveAs(str(pdf_path), FileFormat=17)  # 17 = wdFormatPDF
+            doc.Close()
+        finally:
+            word.Quit()
+    elif ext == ".pptx":
+        ppt = win32com.client.Dispatch("PowerPoint.Application")
+        try:
+            presentation = ppt.Presentations.Open(abs_path, WithWindow=False)
+            presentation.SaveAs(str(pdf_path), FileFormat=32)  # 32 = ppSaveAsPDF
+            presentation.Close()
+        finally:
+            ppt.Quit()
+    else:
+        return None
+
+    _pdf_conversion_cache[cache_key] = str(pdf_path)
+    return pdf_path
 
 
 def _get_document_id(filename: str) -> str:
     return hashlib.md5(filename.encode()).hexdigest()[:12]
 
 
-def _process_document(filepath: Path) -> dict:
-    """Process a document using Docling and cache the results."""
+def _render_pages(filepath: Path) -> tuple[dict, dict]:
+    """Render document pages as PNG images. Returns (page_images, page_dimensions)."""
+    import pypdfium2 as pdfium
+
+    pdf_path = filepath
+    if filepath.suffix.lower() in (".docx", ".pptx"):
+        pdf_path = _convert_to_pdf(filepath)
+
+    page_images = {}
+    page_dimensions = {}
+
+    if pdf_path and pdf_path.exists():
+        pdf_doc = pdfium.PdfDocument(str(pdf_path))
+        for i in range(len(pdf_doc)):
+            page = pdf_doc[i]
+            bitmap = page.render(scale=2.0)
+            pil_image = bitmap.to_pil()
+            buf = io.BytesIO()
+            pil_image.save(buf, format="PNG")
+            page_images[i + 1] = buf.getvalue()
+            page_dimensions[i + 1] = {
+                "width": float(page.get_width()),
+                "height": float(page.get_height()),
+            }
+        pdf_doc.close()
+
+    return page_images, page_dimensions
+
+
+def _extract_text(filepath: Path) -> tuple[list, dict]:
+    """Extract text entries using Docling. Returns (text_entries, page_dimensions)."""
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.pipeline_options import PdfPipelineOptions
 
-    # Enable page image generation for PDFs
     pdf_pipeline_opts = PdfPipelineOptions()
-    pdf_pipeline_opts.generate_page_images = True
+    pdf_pipeline_opts.generate_page_images = False
     pdf_pipeline_opts.images_scale = 2.0
 
     converter = DocumentConverter(
@@ -52,11 +124,9 @@ def _process_document(filepath: Path) -> dict:
     result = converter.convert(str(filepath))
     doc = result.document
 
-    # Extract text entries with page and bounding box info
     text_entries = []
     page_dimensions = {}
 
-    # Get page dimensions from page objects
     for page_no, page in doc.pages.items():
         if hasattr(page, "size") and page.size is not None:
             page_dimensions[page_no] = {
@@ -66,7 +136,6 @@ def _process_document(filepath: Path) -> dict:
 
     entry_id = 0
     for element in doc.iterate_items():
-        # iterate_items() returns (item, level) tuples
         item = element[0] if isinstance(element, tuple) else element
 
         text = ""
@@ -87,7 +156,6 @@ def _process_document(filepath: Path) -> dict:
         }
         entry_id += 1
 
-        # Extract provenance (page number and bounding box)
         if hasattr(item, "prov") and item.prov:
             prov = item.prov[0]
             page_no = prov.page_no if hasattr(prov, "page_no") else 1
@@ -107,61 +175,36 @@ def _process_document(filepath: Path) -> dict:
 
         text_entries.append(entry)
 
-    # Render pages as images
-    page_images = {}
-    for page_no, page in doc.pages.items():
-        if hasattr(page, "image") and page.image is not None:
-            img = page.image.pil_image
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            page_images[page_no] = buf.getvalue()
-            if page_no not in page_dimensions:
-                page_dimensions[page_no] = {
-                    "width": float(img.width),
-                    "height": float(img.height),
-                }
-
-    # Fallback: render PDF pages using pypdfium2 if Docling didn't produce images
-    if not page_images and filepath.suffix.lower() == ".pdf":
-        try:
-            import pypdfium2 as pdfium
-
-            pdf_doc = pdfium.PdfDocument(str(filepath))
-            for i in range(len(pdf_doc)):
-                page = pdf_doc[i]
-                bitmap = page.render(scale=2.0)
-                pil_image = bitmap.to_pil()
-                buf = io.BytesIO()
-                pil_image.save(buf, format="PNG")
-                page_images[i + 1] = buf.getvalue()
-                if (i + 1) not in page_dimensions:
-                    page_dimensions[i + 1] = {
-                        "width": float(page.get_width()),
-                        "height": float(page.get_height()),
-                    }
-            pdf_doc.close()
-        except Exception:
-            pass
-
-    num_pages = max(
-        [e["page"] for e in text_entries if e["page"] > 0] + [len(page_images)],
-        default=1,
-    )
-
-    return {
-        "filename": filepath.name,
-        "num_pages": num_pages,
-        "text_entries": text_entries,
-        "page_images": page_images,
-        "page_dimensions": page_dimensions,
-    }
+    return text_entries, page_dimensions
 
 
-def _get_or_process(filepath: Path) -> dict:
+def _get_or_render(filepath: Path) -> dict:
+    """Render-only path: pypdfium2 page images + dimensions. Fast."""
     doc_id = _get_document_id(filepath.name)
-    if doc_id not in _document_cache:
-        _document_cache[doc_id] = _process_document(filepath)
-    return _document_cache[doc_id]
+    if doc_id not in _render_cache:
+        page_images, page_dimensions = _render_pages(filepath)
+        _render_cache[doc_id] = {
+            "filename": filepath.name,
+            "num_pages": max(len(page_images), 1),
+            "page_images": page_images,
+            "page_dimensions": page_dimensions,
+        }
+    return _render_cache[doc_id]
+
+
+def _get_or_extract_text(filepath: Path) -> dict:
+    """Text-extraction path: Docling. Slow on first call, cached thereafter."""
+    doc_id = _get_document_id(filepath.name)
+    if doc_id not in _text_cache:
+        try:
+            text_entries, docling_dims = _extract_text(filepath)
+        except Exception:
+            text_entries, docling_dims = [], {}
+        _text_cache[doc_id] = {
+            "text_entries": text_entries,
+            "page_dimensions": docling_dims,
+        }
+    return _text_cache[doc_id]
 
 
 def _find_file(doc_id: str) -> Optional[Path]:
@@ -338,14 +381,85 @@ def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
     return items
 
 
+def _build_field_signatures(definition: dict) -> list:
+    """Pre-compute (kind, value) pairs that any field-relevant text entry should match.
+
+    Used to skip entries that can't possibly be a value for any field — paragraphs,
+    headings, boilerplate. Always pass TableItems through (needed for array fields).
+    """
+    signatures: list = []
+
+    def collect(field_list: list) -> None:
+        for field in field_list or []:
+            if field.get("type") == "array":
+                collect(field.get("fields", []))
+                continue
+
+            for example in field.get("examples", []) or []:
+                ex = str(example) if example is not None else ""
+                if not ex:
+                    continue
+                signatures.append(("literal", ex.lower()))
+                if re.match(r'\d{4}-\d{2}-\d{2}', ex):
+                    signatures.append(("regex", re.compile(r'\d{4}[-/]\d{2}[-/]\d{2}')))
+                elif re.match(r'^[A-Z]+-\d+', ex):
+                    signatures.append(("regex", re.compile(r'[A-Z]+-\d+', re.IGNORECASE)))
+                elif re.match(r'^\d+\.\d+$', ex):
+                    signatures.append(("regex", re.compile(r'\d+\.\d+')))
+                elif re.match(r'^\d+$', ex):
+                    signatures.append(("regex", re.compile(r'\b\d+\b')))
+                elif ex in ('$', '€', '£', '¥'):
+                    signatures.append(("regex", re.compile(r'[\$€£¥]')))
+
+            for opt in field.get("available_options", []) or []:
+                if opt:
+                    signatures.append(
+                        ("regex", re.compile(r'\b' + re.escape(str(opt)) + r'\b', re.IGNORECASE))
+                    )
+
+            label = str(field.get("name", "")).replace("_", " ").lower().strip()
+            if label:
+                signatures.append(("literal", label))
+
+    collect(definition.get("document", {}).get("fields", []))
+    return signatures
+
+
+def _entry_could_match(entry: dict, signatures: list) -> bool:
+    """Whether an entry is worth scoring against any field."""
+    if entry.get("type") == "TableItem":
+        return True
+    if not signatures:
+        return True
+
+    text = entry.get("text", "")
+    text_lower = text.lower()
+    for kind, pat in signatures:
+        if kind == "literal":
+            if pat in text_lower:
+                return True
+        else:
+            if pat.search(text):
+                return True
+    return False
+
+
 def _extract_fields(definition: dict, text_entries: list) -> list:
-    """Extract fields defined in the document definition from text entries."""
+    """Extract fields defined in the document definition from text entries.
+
+    Pre-filters text entries to only those that could plausibly be a field value,
+    so the per-field matcher iterates over a much smaller set than the full document.
+    """
     doc = definition.get("document", {})
     fields = doc.get("fields", [])
+
+    signatures = _build_field_signatures(definition)
+    candidates = [e for e in text_entries if _entry_could_match(e, signatures)]
+
     used_ids: set = set()
     results = []
     for field in fields:
-        result = _match_field_to_entries(field, text_entries, used_ids)
+        result = _match_field_to_entries(field, candidates, used_ids)
         results.append(result)
     return results
 
@@ -374,18 +488,17 @@ def list_documents():
 
 @app.get("/api/documents/{doc_id}")
 def get_document(doc_id: str):
-    """Get document metadata and extracted text entries."""
+    """Get document metadata. Fast — does not run text extraction."""
     filepath = _find_file(doc_id)
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    data = _get_or_process(filepath)
+    data = _get_or_render(filepath)
     return {
         "id": doc_id,
         "filename": data["filename"],
         "num_pages": data["num_pages"],
         "page_dimensions": data["page_dimensions"],
-        "text_entries": data["text_entries"],
     }
 
 
@@ -396,7 +509,7 @@ def get_page_image(doc_id: str, page_no: int):
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    data = _get_or_process(filepath)
+    data = _get_or_render(filepath)
     img_bytes = data["page_images"].get(page_no)
     if not img_bytes:
         raise HTTPException(status_code=404, detail=f"Page {page_no} image not available")
@@ -451,7 +564,12 @@ async def create_definition(request: Request):
 
 @app.post("/api/documents/{doc_id}/extract")
 async def extract_fields(doc_id: str, request: Request):
-    """Extract fields from a document using a definition."""
+    """Extract fields from a document using a definition.
+
+    Triggers Docling text extraction lazily on first call per document.
+    Returns Docling's page_dimensions so the client can render bbox overlays
+    in the same coordinate space as the field bboxes.
+    """
     filepath = _find_file(doc_id)
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -465,9 +583,9 @@ async def extract_fields(doc_id: str, request: Request):
     if def_id not in defs:
         raise HTTPException(status_code=404, detail="Definition not found")
 
-    data = _get_or_process(filepath)
+    text_data = _get_or_extract_text(filepath)
     definition = defs[def_id]
-    fields = _extract_fields(definition, data["text_entries"])
+    fields = _extract_fields(definition, text_data["text_entries"])
 
     return {
         "document_id": doc_id,
@@ -475,6 +593,7 @@ async def extract_fields(doc_id: str, request: Request):
         "document_type": definition.get("document", {}).get("document_type", ""),
         "document_description": definition.get("document", {}).get("document_description", ""),
         "fields": fields,
+        "page_dimensions": text_data["page_dimensions"],
     }
 
 
