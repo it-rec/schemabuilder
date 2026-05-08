@@ -21,6 +21,12 @@ export default function DocumentViewer({
     setImageDimensions(null);
   }, [docId]);
 
+  // Clear dimensions when the page changes too: the next image hasn't loaded
+  // yet, and using prior-page dims for the highlight overlay misplaces it.
+  useEffect(() => {
+    setImageDimensions(null);
+  }, [currentPage]);
+
   // Navigate to the highlighted field's page
   useEffect(() => {
     if (!highlightedField || !highlightedField.page) return;

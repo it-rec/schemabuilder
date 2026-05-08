@@ -287,6 +287,9 @@ def _find_file(doc_id: str) -> Optional[Path]:
             return p
         _doc_path_cache.pop(doc_id, None)
 
+    if not TEST_DOCS_DIR.exists():
+        return None
+
     for f in TEST_DOCS_DIR.iterdir():
         if f.suffix.lower() in SUPPORTED_EXTENSIONS:
             fid = _get_document_id(f.name)
@@ -796,6 +799,11 @@ async def create_definition(request: Request):
     doc = body.get("document", {})
     doc_type = doc.get("document_type", "untitled")
     def_id = re.sub(r'[^a-z0-9_]', '_', doc_type.lower()).strip('_')
+    if not def_id:
+        raise HTTPException(
+            status_code=400,
+            detail="document_type must contain at least one alphanumeric character",
+        )
 
     DEFINITIONS_DIR.mkdir(parents=True, exist_ok=True)
     filepath = DEFINITIONS_DIR / f"{def_id}.json"
