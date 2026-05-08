@@ -398,7 +398,17 @@ def _resolve_ocr_decision(filepath: Path) -> bool:
         cached = _ocr_decision_cache.get(key)
         if cached is not None:
             return cached
-        decision = _document_needs_ocr(filepath)
+        # Detection should never break extraction: on any sampling error
+        # default to no-OCR (fast path). A truly-scanned doc misclassified
+        # this way will still extract — just with empty text — which matches
+        # prior behavior, while a digital doc keeps working as expected.
+        try:
+            decision = _document_needs_ocr(filepath)
+        except Exception:
+            logger.exception(
+                "OCR detection failed for %s; defaulting to no OCR", filepath.name
+            )
+            decision = False
         _ocr_decision_cache[key] = decision
         logger.info(
             "OCR decision for %s: %s", filepath.name, "on" if decision else "off"
