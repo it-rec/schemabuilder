@@ -55,9 +55,25 @@ _doc_path_cache: dict = {}
 _signature_cache: dict = {}
 
 
+def _file_signature(filepath: Path) -> tuple:
+    """Stable identity for a file's current contents. Used as part of cache
+    keys so replacing a file in place invalidates the cached render/text/PDF.
+    """
+    try:
+        st = filepath.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ()
+
+
 def _convert_to_pdf(filepath: Path) -> Optional[Path]:
-    """Convert DOCX/PPTX to PDF using MS Office COM automation. Results are cached."""
-    cache_key = str(filepath)
+    """Convert DOCX/PPTX to PDF using MS Office COM automation. Results are cached.
+
+    Cache key includes the source file's mtime+size so the cache is invalidated
+    when the source is edited or replaced in place.
+    """
+    sig = _file_signature(filepath)
+    cache_key = (str(filepath), sig)
     if cache_key in _pdf_conversion_cache:
         cached = Path(_pdf_conversion_cache[cache_key])
         if cached.exists():
@@ -222,15 +238,20 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
 def _get_or_render(filepath: Path) -> dict:
     """Render-only path: opens the PDF and records dimensions. Page images are
     populated on demand by _render_page.
+
+    Cache entries record the source file's signature; if the file changes on
+    disk the entry is rebuilt instead of returning stale page dimensions or a
+    pdf_path that points at an outdated converted PDF.
     """
     doc_id = _get_document_id(filepath.name)
+    sig = _file_signature(filepath)
     cached = _render_cache.get(doc_id)
-    if cached is not None:
+    if cached is not None and cached.get("_sig") == sig:
         return cached
 
     with _render_lock:
         cached = _render_cache.get(doc_id)
-        if cached is not None:
+        if cached is not None and cached.get("_sig") == sig:
             return cached
 
         pdf_path, num_pages, page_dimensions = _open_pdf_metadata(filepath)
@@ -240,6 +261,7 @@ def _get_or_render(filepath: Path) -> dict:
             "page_dimensions": page_dimensions,
             "pdf_path": str(pdf_path) if pdf_path else None,
             "page_images": {},
+            "_sig": sig,
         }
     return _render_cache[doc_id]
 
@@ -261,15 +283,20 @@ def _render_page(filepath: Path, page_no: int) -> Optional[bytes]:
 
 
 def _get_or_extract_text(filepath: Path) -> dict:
-    """Text-extraction path: Docling. Slow on first call, cached thereafter."""
+    """Text-extraction path: Docling. Slow on first call, cached thereafter.
+
+    Cache key carries the source file signature so an edited document
+    re-extracts instead of replaying stale text entries from a prior version.
+    """
     doc_id = _get_document_id(filepath.name)
+    sig = _file_signature(filepath)
     cached = _text_cache.get(doc_id)
-    if cached is not None:
+    if cached is not None and cached.get("_sig") == sig:
         return cached
 
     with _text_lock:
         cached = _text_cache.get(doc_id)
-        if cached is not None:
+        if cached is not None and cached.get("_sig") == sig:
             return cached
         try:
             text_entries, docling_dims = _extract_text(filepath)
@@ -278,6 +305,7 @@ def _get_or_extract_text(filepath: Path) -> dict:
         _text_cache[doc_id] = {
             "text_entries": text_entries,
             "page_dimensions": docling_dims,
+            "_sig": sig,
         }
     return _text_cache[doc_id]
 
