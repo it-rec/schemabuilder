@@ -3,18 +3,44 @@
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 
-app = FastAPI(title="Document Viewer API")
+logger = logging.getLogger("schemabuilder")
+
+# Background workers for prefetch (page render warm-up, text extraction warm-up,
+# converter construction). Two workers is plenty: text extraction is the slow
+# leg and is itself serialized on the shared converter; a second worker handles
+# page rasterization in parallel so the first paint isn't blocked behind it.
+_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Build the Docling converter eagerly in the background so the first
+    # /extract request doesn't pay the model-load cost (~seconds on CPU,
+    # less on GPU but still non-trivial). Failure here is non-fatal: the
+    # lazy path will retry on first real call.
+    _bg_executor.submit(_warm_up_converter)
+    try:
+        yield
+    finally:
+        _bg_executor.shutdown(wait=False, cancel_futures=True)
+
+
+app = FastAPI(title="Document Viewer API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,6 +49,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Compress JSON responses (extraction payloads can be tens of KB once
+# definitions grow). PNGs are already compressed and skipped by min size.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_documents"
 DEFINITIONS_DIR = Path(__file__).parent / "definitions"
@@ -59,6 +88,11 @@ _signature_cache: dict = {}
 # by `_text_lock` (extraction happens inside it), so sharing is safe.
 _text_converter = None
 _text_converter_lock = threading.Lock()
+
+# Doc IDs with a prefetch job already submitted/running. Prevents flooding the
+# background pool when the user clicks rapidly through the document list.
+_prefetch_inflight: set = set()
+_prefetch_inflight_lock = threading.Lock()
 
 
 def _file_signature(filepath: Path) -> tuple:
@@ -170,6 +204,96 @@ def _render_single_page(pdf_path: str, page_no: int) -> Optional[bytes]:
         pdf_doc.close()
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_accelerator_device(AcceleratorDevice):
+    """Pick the best accelerator: env override → CUDA → MPS → CPU.
+
+    Docling's AUTO does similar detection internally, but we probe ourselves so
+    we can log what was chosen (helpful when "why is it slow?" comes up) and
+    so the env override (DOCLING_DEVICE=cpu|cuda|mps|auto) is honored exactly.
+    """
+    forced = (os.getenv("DOCLING_DEVICE") or "").strip().upper()
+    if forced:
+        chosen = getattr(AcceleratorDevice, forced, None)
+        if chosen is not None:
+            return chosen
+        logger.warning("Unknown DOCLING_DEVICE=%s; falling back to AUTO", forced)
+
+    try:
+        import torch  # type: ignore
+
+        if torch.cuda.is_available():
+            cuda = getattr(AcceleratorDevice, "CUDA", None)
+            if cuda is not None:
+                return cuda
+        mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+        if mps_backend is not None and mps_backend.is_available():
+            mps = getattr(AcceleratorDevice, "MPS", None)
+            if mps is not None:
+                return mps
+    except Exception:
+        pass
+
+    return getattr(AcceleratorDevice, "AUTO", AcceleratorDevice.CPU)
+
+
+def _build_text_converter():
+    """Build the Docling DocumentConverter with accelerator + OCR settings.
+
+    Accelerator: auto-prefers CUDA → MPS → CPU. Override via DOCLING_DEVICE.
+    Threads: defaults to CPU count; override via DOCLING_NUM_THREADS.
+    OCR: off by default for speed. Set DOCLING_DO_OCR=1 to re-enable for
+    scanned docs. Table structure is left on (default) — the field-extraction
+    code in _match_array_field relies on TableItem detection.
+    """
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+    # AcceleratorOptions/AcceleratorDevice moved between submodules across
+    # docling versions (pipeline_options on 2.14, accelerator_options later).
+    try:
+        from docling.datamodel.accelerator_options import (  # type: ignore
+            AcceleratorOptions,
+            AcceleratorDevice,
+        )
+    except ImportError:
+        from docling.datamodel.pipeline_options import (  # type: ignore
+            AcceleratorOptions,
+            AcceleratorDevice,
+        )
+
+    num_threads = int(os.getenv("DOCLING_NUM_THREADS") or os.cpu_count() or 4)
+    device = _resolve_accelerator_device(AcceleratorDevice)
+    accelerator = AcceleratorOptions(num_threads=num_threads, device=device)
+
+    pdf_pipeline_opts = PdfPipelineOptions()
+    pdf_pipeline_opts.generate_page_images = False
+    pdf_pipeline_opts.images_scale = 2.0
+    pdf_pipeline_opts.accelerator_options = accelerator
+    # Default OFF: digital PDFs (the common case here) carry their own text;
+    # OCR is the single largest contributor to extraction latency.
+    pdf_pipeline_opts.do_ocr = _env_flag("DOCLING_DO_OCR", False)
+
+    logger.info(
+        "Docling converter: device=%s threads=%s ocr=%s",
+        getattr(device, "name", device),
+        num_threads,
+        pdf_pipeline_opts.do_ocr,
+    )
+
+    return DocumentConverter(
+        format_options={
+            "pdf": PdfFormatOption(pipeline_options=pdf_pipeline_opts),
+        }
+    )
+
+
 def _get_text_converter():
     """Lazily build (and reuse) the Docling DocumentConverter."""
     global _text_converter
@@ -178,19 +302,16 @@ def _get_text_converter():
     with _text_converter_lock:
         if _text_converter is not None:
             return _text_converter
-        from docling.document_converter import DocumentConverter, PdfFormatOption
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-
-        pdf_pipeline_opts = PdfPipelineOptions()
-        pdf_pipeline_opts.generate_page_images = False
-        pdf_pipeline_opts.images_scale = 2.0
-
-        _text_converter = DocumentConverter(
-            format_options={
-                "pdf": PdfFormatOption(pipeline_options=pdf_pipeline_opts),
-            }
-        )
+        _text_converter = _build_text_converter()
     return _text_converter
+
+
+def _warm_up_converter():
+    """Background warm-up entrypoint; never raises."""
+    try:
+        _get_text_converter()
+    except Exception:
+        logger.exception("Docling converter warm-up failed; will retry lazily")
 
 
 def _extract_text(filepath: Path) -> tuple[list, dict]:
@@ -345,6 +466,42 @@ def _get_or_extract_text(filepath: Path) -> dict:
             "_sig": sig,
         }
     return _text_cache[doc_id]
+
+
+def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
+    """Warm caches for a document the user just selected.
+
+    Renders page 1 (so the first paint is instant after metadata returns) and
+    runs Docling text extraction (so the subsequent /extract POST returns
+    cached results). Deduped per doc_id so rapid sidebar clicks don't spawn N
+    parallel extractions for the same file.
+    """
+    with _prefetch_inflight_lock:
+        if doc_id in _prefetch_inflight:
+            return
+        _prefetch_inflight.add(doc_id)
+
+    def _job():
+        try:
+            try:
+                _render_page(filepath, 1)
+            except Exception:
+                logger.exception("Prefetch page-1 render failed for %s", filepath.name)
+            try:
+                _get_or_extract_text(filepath)
+            except Exception:
+                logger.exception("Prefetch text extraction failed for %s", filepath.name)
+        finally:
+            with _prefetch_inflight_lock:
+                _prefetch_inflight.discard(doc_id)
+
+    try:
+        _bg_executor.submit(_job)
+    except RuntimeError:
+        # Executor already shut down (e.g. during test teardown). Drop the
+        # inflight marker so a future request can re-trigger.
+        with _prefetch_inflight_lock:
+            _prefetch_inflight.discard(doc_id)
 
 
 def _find_file(doc_id: str) -> Optional[Path]:
@@ -810,12 +967,18 @@ def list_documents():
 
 @app.get("/api/documents/{doc_id}")
 def get_document(doc_id: str):
-    """Get document metadata. Fast — does not run text extraction or page rasterization."""
+    """Get document metadata. Fast — does not run text extraction or page rasterization.
+
+    Kicks off a background prefetch for page 1 + text extraction so by the
+    time the frontend renders the viewer and POSTs to /extract, both are
+    typically already in the cache.
+    """
     filepath = _find_file(doc_id)
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
 
     data = _get_or_render(filepath)
+    _kick_background_prefetch(doc_id, filepath)
     return {
         "id": doc_id,
         "filename": data["filename"],
@@ -825,18 +988,32 @@ def get_document(doc_id: str):
 
 
 @app.get("/api/documents/{doc_id}/pages/{page_no}")
-def get_page_image(doc_id: str, page_no: int):
-    """Get a rendered page image as PNG. Pages are rendered on demand and memoized."""
+def get_page_image(doc_id: str, page_no: int, request: Request):
+    """Get a rendered page image as PNG. Pages are rendered on demand and memoized.
+
+    Sends an ETag tied to the file's mtime/size so the browser can revalidate
+    cheaply once the max-age expires (or when the user reloads with a warm
+    disk cache); a matching If-None-Match short-circuits to 304 without
+    re-sending the PNG bytes.
+    """
     filepath = _find_file(doc_id)
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    sig = _file_signature(filepath)
+    sig_token = f"{sig[0]}-{sig[1]}" if sig else "0"
+    etag = f'"{doc_id}-{page_no}-{sig_token}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "public, max-age=3600"})
 
     img_bytes = _render_page(filepath, page_no)
     if not img_bytes:
         raise HTTPException(status_code=404, detail=f"Page {page_no} image not available")
 
-    # Tell the browser it can reuse this image; pages are content-addressed by doc_id+page_no.
-    headers = {"Cache-Control": "public, max-age=3600"}
+    headers = {
+        "Cache-Control": "public, max-age=3600",
+        "ETag": etag,
+    }
     return Response(content=img_bytes, media_type="image/png", headers=headers)
 
 
