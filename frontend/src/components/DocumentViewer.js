@@ -35,6 +35,8 @@ export default function DocumentViewer({
 
   // Pre-fetch adjacent pages so navigation is instant. The browser caches the
   // PNG, and the server memoizes the rendered bytes, so this also warms both.
+  // fetchPriority="low" lets the browser keep the visible page's request at
+  // the front of the queue instead of competing with prefetches.
   useEffect(() => {
     if (!docId || numPages <= 1) return;
     const adjacent = [currentPage - 1, currentPage + 1].filter(
@@ -42,6 +44,8 @@ export default function DocumentViewer({
     );
     const imgs = adjacent.map((p) => {
       const img = new Image();
+      if ("fetchPriority" in img) img.fetchPriority = "low";
+      img.decoding = "async";
       img.src = getPageImageUrl(docId, p);
       return img;
     });
@@ -173,6 +177,10 @@ export default function DocumentViewer({
             onLoad={handleImageLoad}
             onError={handleImageError}
             className="document-viewer__image"
+            // The visible page is the largest contentful paint here; tell the
+            // browser to schedule its bytes ahead of the prefetched neighbors.
+            fetchpriority="high"
+            decoding="async"
           />
           {highlightStyle && (
             <div

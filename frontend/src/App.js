@@ -14,6 +14,7 @@ import {
   fetchDocument,
   fetchDefinitions,
   extractFields,
+  getPageImageUrl,
 } from "./services/api";
 import "./App.scss";
 
@@ -63,6 +64,16 @@ export default function App() {
     setDocumentData(null);
     setExtraction(null);
     setHighlightedField(null);
+
+    // Kick the page-1 image fetch off in parallel with metadata. The metadata
+    // request also triggers backend prefetch (page render + Docling), so by
+    // the time documentData arrives the PNG is usually already in the browser
+    // disk cache and the <img> in DocumentViewer hits it instantly.
+    const warmImg = new Image();
+    if ("fetchPriority" in warmImg) warmImg.fetchPriority = "high";
+    warmImg.decoding = "async";
+    warmImg.src = getPageImageUrl(selectedDocId, 1);
+
     fetchDocument(selectedDocId)
       .then((data) => {
         if (!cancelled) setDocumentData(data);
@@ -75,6 +86,9 @@ export default function App() {
       });
     return () => {
       cancelled = true;
+      // Release the warm-up reference so the browser can free the decoded
+      // bitmap if we abandoned this doc before the image landed.
+      warmImg.src = "";
     };
   }, [selectedDocId]);
 
