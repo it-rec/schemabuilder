@@ -67,7 +67,10 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
 
     ext = filepath.suffix.lower()
     abs_path = str(filepath.resolve())
-    pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}.pdf"
+    # Include the source extension in the temp PDF name so two source files
+    # that share a stem (e.g. report.docx and report.pptx) don't clobber each
+    # other's converted PDF and serve mixed content via the cache.
+    pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}{ext}.pdf"
 
     if ext == ".docx":
         word = win32com.client.Dispatch("Word.Application")

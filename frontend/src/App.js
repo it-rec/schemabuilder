@@ -86,6 +86,9 @@ export default function App() {
     let cancelled = false;
     setExtracting(true);
     setExtraction(null);
+    // Drop any field highlight from the prior definition; its bbox refers to
+    // a field object that no longer exists in the new extraction.
+    setHighlightedField(null);
     extractFields(selectedDocId, selectedDefId)
       .then((data) => {
         if (!cancelled) setExtraction(data);
