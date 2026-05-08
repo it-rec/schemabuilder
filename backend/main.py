@@ -865,11 +865,26 @@ def get_definition(def_id: str):
     return {"id": def_id, **defs[def_id]}
 
 
+async def _parse_json_body(request: Request) -> dict:
+    """Parse a request body as a JSON object. Returns 400 on malformed JSON or
+    non-object bodies (null, lists, strings) so endpoints can rely on dict
+    semantics without 500-ing on `.get` against a non-dict."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    return body
+
+
 @app.post("/api/definitions")
 async def create_definition(request: Request):
     """Upload a new document class definition."""
-    body = await request.json()
-    doc = body.get("document", {})
+    body = await _parse_json_body(request)
+    doc = body.get("document")
+    if not isinstance(doc, dict):
+        raise HTTPException(status_code=400, detail="`document` must be a JSON object")
     doc_type = doc.get("document_type", "untitled")
     def_id = re.sub(r'[^a-z0-9_]', '_', doc_type.lower()).strip('_')
     if not def_id:
@@ -904,9 +919,9 @@ async def extract_fields(doc_id: str, request: Request):
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     def_id = body.get("definition_id")
-    if not def_id:
+    if not isinstance(def_id, str) or not def_id:
         raise HTTPException(status_code=400, detail="definition_id is required")
 
     defs = _load_definitions()
