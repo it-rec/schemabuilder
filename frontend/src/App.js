@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
 import {
   Theme,
   Header,
@@ -89,6 +89,21 @@ export default function App() {
     setSelectedDefId(selectedItem?.id || null);
   }, []);
 
+  // Bboxes returned by extraction are in Docling's coordinate space, which can
+  // differ from the pypdfium2 dims used for the rendered image. Prefer Docling's
+  // page_dimensions for highlight math when available.
+  const viewerData = useMemo(() => {
+    if (!documentData) return null;
+    const extDims = extraction?.page_dimensions;
+    if (extDims && Object.keys(extDims).length > 0) {
+      return {
+        ...documentData,
+        page_dimensions: { ...documentData.page_dimensions, ...extDims },
+      };
+    }
+    return documentData;
+  }, [documentData, extraction]);
+
   return (
     <Theme theme="g10">
       <Header aria-label="Document Viewer">
@@ -118,7 +133,7 @@ export default function App() {
           <main className="app-layout__main" data-testid="document-viewer-panel">
             <DocumentViewer
               docId={selectedDocId}
-              documentData={documentData}
+              documentData={viewerData}
               highlightedField={highlightedField}
               loading={loading}
             />

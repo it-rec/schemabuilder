@@ -16,7 +16,11 @@
       "Bash(powershell.exe -NoProfile -Command \"node -e \"\"const icons = require\\(''@carbon/icons-react''\\); const matches = Object.keys\\(icons\\).filter\\(k => k.toLowerCase\\(\\).includes\\(''present''\\)\\); console.log\\(matches.join\\(''\\\\n''\\)\\);\"\"\")",
       "Bash(powershell.exe -NoProfile -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; node -e \"\"const icons = require\\(''@carbon/react/icons''\\); const matches = Object.keys\\(icons\\).filter\\(k => k.toLowerCase\\(\\).includes\\(''present''\\)\\); console.log\\(matches.join\\(''\\\\n''\\)\\);\"\"\")",
       "Bash(powershell.exe -NoProfile -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; node -e \"\"const icons = require\\(''@carbon/react/icons''\\); const matches = Object.keys\\(icons\\).filter\\(k => k.toLowerCase\\(\\).includes\\(''wordprocessor''\\)\\); console.log\\(matches.join\\(''\\\\n''\\)\\);\"\"\")",
-      "Bash(powershell.exe -NoProfile -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; npx react-scripts build 2>&1\")"
+      "Bash(powershell.exe -NoProfile -Command \"cd ''C:\\\\Users\\\\Michael\\\\IdeaProjects\\\\schemabuilder\\\\frontend''; npx react-scripts build 2>&1\")",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nReplace Docling with PyMuPDF for text extraction\n\nDocling loads ML models which makes extraction slow \\(~10-30s per document\\).\nPyMuPDF uses programmatic PDF parsing instead, reducing extraction to ~170ms.\n\n- Text extraction via fitz.get_text\\(\"dict\"\\) with bounding boxes\n- Font-based heuristics classify blocks as Title/SectionHeader/List/Text\n- Table detection via PyMuPDF''s find_tables\\(\\)\n- On-demand page rendering with pypdfium2 \\(no longer caches all pages in memory\\)\n- Async endpoints with thread pool executors\n- DOCX/PPTX support via MS Office COM conversion to PDF\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nFix race condition when switching documents during loading\n\nWhen clicking a new document while the previous one was still loading,\nthe stale response could overwrite the new document''s data, showing\nincorrect bounding boxes. Use AbortController to cancel in-flight\nfetches when the selected document changes.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)"
     ]
   }
 }
