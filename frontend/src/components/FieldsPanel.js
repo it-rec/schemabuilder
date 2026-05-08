@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import { Tag, Tooltip } from "@carbon/react";
 import {
   CheckmarkFilled,
@@ -9,7 +9,7 @@ import {
   Information,
 } from "@carbon/react/icons";
 
-function ConfidenceIndicator({ confidence }) {
+const ConfidenceIndicator = React.memo(function ConfidenceIndicator({ confidence }) {
   if (confidence >= 0.8) {
     return (
       <Tooltip label={`Confidence: ${Math.round(confidence * 100)}%`} align="left">
@@ -29,27 +29,69 @@ function ConfidenceIndicator({ confidence }) {
       <UndefinedFilled size={16} className="fields-panel__confidence--low" />
     </Tooltip>
   );
-}
+});
 
-function FieldItem({ field, onHoverField }) {
+const SubFieldRow = React.memo(function SubFieldRow({
+  field,
+  parentName,
+  index,
+  subField,
+  onHoverField,
+}) {
+  const handleEnter = useCallback(() => {
+    if (subField.matched_entry_id != null) onHoverField(subField);
+  }, [subField, onHoverField]);
+  const handleLeave = useCallback(() => onHoverField(null), [onHoverField]);
+
+  return (
+    <li
+      className="fields-panel__sub-field"
+      onMouseEnter={handleEnter}
+      onMouseLeave={handleLeave}
+      data-testid={`field-${parentName}-${index}-${subField.name}`}
+    >
+      <div className="fields-panel__sub-field-row">
+        <span className="fields-panel__sub-field-name">
+          {subField.name.replace(/_/g, " ")}
+        </span>
+        <ConfidenceIndicator confidence={subField.confidence || 0} />
+      </div>
+      {subField.extracted_value ? (
+        <span className="fields-panel__sub-field-value">
+          {subField.extracted_value}
+        </span>
+      ) : (
+        <span className="fields-panel__sub-field-value fields-panel__sub-field-value--empty">
+          Not found
+        </span>
+      )}
+    </li>
+  );
+});
+
+const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
   const [expanded, setExpanded] = useState(false);
   const isArray = field.type === "array";
   const hasValue = field.extracted_value != null;
   const hasItems = isArray && field.items && field.items.length > 0;
 
-  const fieldLabel = field.name.replace(/_/g, " ");
+  const fieldLabel = useMemo(() => field.name.replace(/_/g, " "), [field.name]);
+
+  const handleEnter = useCallback(() => {
+    if (field.matched_entry_id != null) onHoverField(field);
+  }, [field, onHoverField]);
+  const handleLeave = useCallback(() => onHoverField(null), [onHoverField]);
+  const handleClick = useCallback(() => {
+    if (isArray) setExpanded((e) => !e);
+  }, [isArray]);
 
   return (
     <li className="fields-panel__field">
       <div
         className={`fields-panel__field-header ${hasValue || hasItems ? "fields-panel__field-header--matched" : ""}`}
-        onMouseEnter={() => {
-          if (field.matched_entry_id != null) onHoverField(field);
-        }}
-        onMouseLeave={() => onHoverField(null)}
-        onClick={() => {
-          if (isArray) setExpanded(!expanded);
-        }}
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+        onClick={handleClick}
         data-testid={`field-${field.name}`}
       >
         <div className="fields-panel__field-label-row">
@@ -102,31 +144,13 @@ function FieldItem({ field, onHoverField }) {
                 </div>
                 <ul className="fields-panel__array-item-fields">
                   {item.fields.map((subField) => (
-                    <li
+                    <SubFieldRow
                       key={subField.name}
-                      className="fields-panel__sub-field"
-                      onMouseEnter={() => {
-                        if (subField.matched_entry_id != null) onHoverField(subField);
-                      }}
-                      onMouseLeave={() => onHoverField(null)}
-                      data-testid={`field-${field.name}-${idx}-${subField.name}`}
-                    >
-                      <div className="fields-panel__sub-field-row">
-                        <span className="fields-panel__sub-field-name">
-                          {subField.name.replace(/_/g, " ")}
-                        </span>
-                        <ConfidenceIndicator confidence={subField.confidence || 0} />
-                      </div>
-                      {subField.extracted_value ? (
-                        <span className="fields-panel__sub-field-value">
-                          {subField.extracted_value}
-                        </span>
-                      ) : (
-                        <span className="fields-panel__sub-field-value fields-panel__sub-field-value--empty">
-                          Not found
-                        </span>
-                      )}
-                    </li>
+                      parentName={field.name}
+                      index={idx}
+                      subField={subField}
+                      onHoverField={onHoverField}
+                    />
                   ))}
                 </ul>
               </div>
@@ -138,13 +162,28 @@ function FieldItem({ field, onHoverField }) {
       )}
     </li>
   );
-}
+});
 
 export default function FieldsPanel({
   extraction,
   onHoverField,
   loading,
 }) {
+  const fields = extraction?.fields;
+
+  const matchedCount = useMemo(() => {
+    if (!fields) return 0;
+    let n = 0;
+    for (const f of fields) {
+      if (f.extracted_value != null) {
+        n++;
+      } else if (f.type === "array" && f.items && f.items.length > 0) {
+        n++;
+      }
+    }
+    return n;
+  }, [fields]);
+
   if (loading) {
     return (
       <div className="fields-panel">
@@ -165,10 +204,6 @@ export default function FieldsPanel({
     );
   }
 
-  const matchedCount = extraction.fields.filter(
-    (f) => f.extracted_value != null || (f.type === "array" && f.items && f.items.length > 0)
-  ).length;
-
   return (
     <div className="fields-panel">
       <div className="fields-panel__header">
@@ -176,7 +211,7 @@ export default function FieldsPanel({
           {extraction.document_type}
         </h4>
         <Tag size="sm" type={matchedCount > 0 ? "green" : "gray"}>
-          {matchedCount}/{extraction.fields.length} found
+          {matchedCount}/{fields.length} found
         </Tag>
       </div>
       {extraction.document_description && (
@@ -185,7 +220,7 @@ export default function FieldsPanel({
         </p>
       )}
       <ul className="fields-panel__list">
-        {extraction.fields.map((field) => (
+        {fields.map((field) => (
           <FieldItem
             key={field.name}
             field={field}
