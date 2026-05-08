@@ -16,6 +16,8 @@ Pillow==11.1.0
 #
 # Or for ROCm / MPS, see https://pytorch.org/get-started/locally/.
 # The accelerator is auto-detected at startup (CUDA → MPS → CPU). Override
-# with DOCLING_DEVICE=cpu|cuda|mps. Disable OCR (default) with DOCLING_DO_OCR=0;
-# enable for scanned docs with DOCLING_DO_OCR=1. Tune CPU threads with
-# DOCLING_NUM_THREADS=<N>.
+# with DOCLING_DEVICE=cpu|cuda|mps. OCR is decided per-document by sampling
+# extractable text via pypdfium2: digital PDFs run on the fast no-OCR
+# pipeline, image-only PDFs route through the OCR converter automatically.
+# Force the decision globally with DOCLING_DO_OCR=0 (always off) or
+# DOCLING_DO_OCR=1 (always on). Tune CPU threads with DOCLING_NUM_THREADS=<N>.

@@ -83,11 +83,19 @@ _doc_path_cache: dict = {}
 # lazily and reused across extract calls for the same definition snapshot.
 _signature_cache: dict = {}
 
-# Module-level Docling converter. Construction loads layout/OCR models which is
-# slow; reuse a single instance across documents. Concurrent calls are serialized
-# by `_text_lock` (extraction happens inside it), so sharing is safe.
-_text_converter = None
-_text_converter_lock = threading.Lock()
+# Module-level Docling converters keyed by do_ocr. Construction loads
+# layout/OCR models which is slow; reuse instances across documents. The
+# no-OCR converter handles digital docs (the common case) and is warmed at
+# startup; the OCR-enabled converter is built lazily the first time we see
+# a doc that actually needs OCR, so users with no scanned docs never pay
+# for loading the OCR models.
+_text_converters: dict = {}
+_text_converters_lock = threading.Lock()
+
+# Per-document OCR decision cache. Keyed by (filename, file signature) so a
+# file replaced in place is re-evaluated. Entries are bool.
+_ocr_decision_cache: dict = {}
+_ocr_decision_lock = threading.Lock()
 
 # Doc IDs with a prefetch job already submitted/running. Prevents flooding the
 # background pool when the user clicks rapidly through the document list.
@@ -204,13 +212,6 @@ def _render_single_page(pdf_path: str, page_no: int) -> Optional[bytes]:
         pdf_doc.close()
 
 
-def _env_flag(name: str, default: bool) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return val.strip().lower() in ("1", "true", "yes", "on")
-
-
 def _resolve_accelerator_device(AcceleratorDevice):
     """Pick the best accelerator: env override → CUDA → MPS → CPU.
 
@@ -243,14 +244,15 @@ def _resolve_accelerator_device(AcceleratorDevice):
     return getattr(AcceleratorDevice, "AUTO", AcceleratorDevice.CPU)
 
 
-def _build_text_converter():
-    """Build the Docling DocumentConverter with accelerator + OCR settings.
+def _build_text_converter(do_ocr: bool):
+    """Build a Docling DocumentConverter with accelerator + OCR settings.
 
     Accelerator: auto-prefers CUDA → MPS → CPU. Override via DOCLING_DEVICE.
     Threads: defaults to CPU count; override via DOCLING_NUM_THREADS.
-    OCR: off by default for speed. Set DOCLING_DO_OCR=1 to re-enable for
-    scanned docs. Table structure is left on (default) — the field-extraction
-    code in _match_array_field relies on TableItem detection.
+    OCR is decided per-document by `_resolve_ocr_decision`; this builder just
+    materializes a converter for one branch of that decision. Table structure
+    is left on (default) — the field-extraction code in `_match_array_field`
+    relies on TableItem detection.
     """
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.pipeline_options import PdfPipelineOptions
@@ -276,15 +278,13 @@ def _build_text_converter():
     pdf_pipeline_opts.generate_page_images = False
     pdf_pipeline_opts.images_scale = 2.0
     pdf_pipeline_opts.accelerator_options = accelerator
-    # Default OFF: digital PDFs (the common case here) carry their own text;
-    # OCR is the single largest contributor to extraction latency.
-    pdf_pipeline_opts.do_ocr = _env_flag("DOCLING_DO_OCR", False)
+    pdf_pipeline_opts.do_ocr = do_ocr
 
     logger.info(
-        "Docling converter: device=%s threads=%s ocr=%s",
+        "Docling converter built: device=%s threads=%s ocr=%s",
         getattr(device, "name", device),
         num_threads,
-        pdf_pipeline_opts.do_ocr,
+        do_ocr,
     )
 
     return DocumentConverter(
@@ -294,29 +294,140 @@ def _build_text_converter():
     )
 
 
-def _get_text_converter():
-    """Lazily build (and reuse) the Docling DocumentConverter."""
-    global _text_converter
-    if _text_converter is not None:
-        return _text_converter
-    with _text_converter_lock:
-        if _text_converter is not None:
-            return _text_converter
-        _text_converter = _build_text_converter()
-    return _text_converter
+def _get_text_converter(do_ocr: bool):
+    """Return the cached converter for the requested OCR mode, building if needed."""
+    cached = _text_converters.get(do_ocr)
+    if cached is not None:
+        return cached
+    with _text_converters_lock:
+        cached = _text_converters.get(do_ocr)
+        if cached is not None:
+            return cached
+        cv = _build_text_converter(do_ocr=do_ocr)
+        _text_converters[do_ocr] = cv
+        return cv
+
+
+# Pages to sample when guessing whether a PDF needs OCR. Few enough to stay
+# in the millisecond budget for selection-time prefetch; spread across the
+# document so a cover page with a single watermark image doesn't dominate.
+_OCR_DETECT_SAMPLE_PAGES = 3
+# Aggregate character count across sampled pages below which we treat the
+# document as image-only and route it through the OCR-enabled converter.
+_OCR_DETECT_MIN_CHARS = 30
+# If a single page already produces this many characters, the document is
+# obviously digital and we can skip the rest of the sample.
+_OCR_DETECT_FAST_EXIT_CHARS = 100
+
+
+def _document_needs_ocr(filepath: Path) -> bool:
+    """Heuristic: does this document have so little extractable text that OCR
+    is worth the cost?
+
+    DOCX/PPTX always carry structured text; short-circuit to False. For PDFs,
+    pull text from a few sampled pages via pypdfium2 (much faster than
+    standing up Docling's full pipeline) and treat near-empty results as a
+    scanned document.
+    """
+    if filepath.suffix.lower() != ".pdf":
+        return False
+
+    import pypdfium2 as pdfium
+
+    try:
+        pdf_doc = pdfium.PdfDocument(str(filepath))
+    except Exception:
+        # If we can't open it for sampling we can't extract from it anyway;
+        # take the fast path and let docling surface whatever error occurs.
+        return False
+
+    try:
+        n_pages = len(pdf_doc)
+        if n_pages == 0:
+            return False
+
+        if n_pages <= _OCR_DETECT_SAMPLE_PAGES:
+            sample = list(range(n_pages))
+        else:
+            # First, middle, last — covers cover-only-image cases and trailing
+            # appendices that may differ from the body.
+            sample = sorted({0, n_pages // 2, n_pages - 1})
+
+        total_chars = 0
+        for i in sample:
+            page = pdf_doc[i]
+            textpage = None
+            try:
+                textpage = page.get_textpage()
+                text = textpage.get_text_range()
+            except Exception:
+                text = ""
+            finally:
+                if textpage is not None:
+                    textpage.close()
+            total_chars += len((text or "").strip())
+            if total_chars >= _OCR_DETECT_FAST_EXIT_CHARS:
+                return False
+        return total_chars < _OCR_DETECT_MIN_CHARS
+    finally:
+        pdf_doc.close()
+
+
+def _resolve_ocr_decision(filepath: Path) -> bool:
+    """Per-document OCR decision with file-signature cache.
+
+    DOCLING_DO_OCR forces a global override (1 = on, 0 = off) for the rare
+    case where the heuristic guesses wrong; otherwise the decision is made
+    per-doc and cached by (name, mtime, size) so editing a file in place
+    re-samples it.
+    """
+    forced = os.getenv("DOCLING_DO_OCR")
+    if forced is not None:
+        v = forced.strip().lower()
+        if v in ("1", "true", "yes", "on"):
+            return True
+        if v in ("0", "false", "no", "off"):
+            return False
+
+    sig = _file_signature(filepath)
+    key = (filepath.name, sig)
+    cached = _ocr_decision_cache.get(key)
+    if cached is not None:
+        return cached
+    with _ocr_decision_lock:
+        cached = _ocr_decision_cache.get(key)
+        if cached is not None:
+            return cached
+        decision = _document_needs_ocr(filepath)
+        _ocr_decision_cache[key] = decision
+        logger.info(
+            "OCR decision for %s: %s", filepath.name, "on" if decision else "off"
+        )
+        return decision
 
 
 def _warm_up_converter():
-    """Background warm-up entrypoint; never raises."""
+    """Background warm-up entrypoint; never raises.
+
+    Only the no-OCR converter is built up front. The OCR-enabled converter
+    loads heavier models and is built lazily the first time a scanned doc
+    actually requests it, so users with only digital docs never pay for it.
+    """
     try:
-        _get_text_converter()
+        _get_text_converter(do_ocr=False)
     except Exception:
         logger.exception("Docling converter warm-up failed; will retry lazily")
 
 
 def _extract_text(filepath: Path) -> tuple[list, dict]:
-    """Extract text entries using Docling. Returns (text_entries, page_dimensions)."""
-    converter = _get_text_converter()
+    """Extract text entries using Docling. Returns (text_entries, page_dimensions).
+
+    Picks the OCR-enabled or no-OCR converter based on a fast pypdfium2 text
+    sample. The decision is cached per file signature, so subsequent calls
+    pay only a dict lookup.
+    """
+    do_ocr = _resolve_ocr_decision(filepath)
+    converter = _get_text_converter(do_ocr=do_ocr)
     result = converter.convert(str(filepath))
     doc = result.document
 
