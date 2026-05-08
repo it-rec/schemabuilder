@@ -246,7 +246,18 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
                         "b": float(bbox.b),
                     }
                     if hasattr(bbox, "coord_origin"):
-                        entry["bbox"]["coord_origin"] = str(bbox.coord_origin)
+                        # docling-core's CoordOrigin is an Enum; str(member) is
+                        # version-dependent ("BOTTOMLEFT" on Python 3.11+ str-
+                        # based enums, "CoordOrigin.BOTTOMLEFT" on 3.10). Pull
+                        # the underlying value/name so the frontend's
+                        # === "BOTTOMLEFT" check is reliable.
+                        co = bbox.coord_origin
+                        if hasattr(co, "value"):
+                            entry["bbox"]["coord_origin"] = str(co.value)
+                        elif hasattr(co, "name"):
+                            entry["bbox"]["coord_origin"] = co.name
+                        else:
+                            entry["bbox"]["coord_origin"] = str(co)
 
         text_entries.append(entry)
 
@@ -400,7 +411,10 @@ def _load_definitions() -> dict:
         _definitions_signature = sig
         # Stale signature entries are harmless; clear to bound memory.
         _signature_cache.clear()
-    return _definitions_cache
+        # Return the local `defs`: another thread could call
+        # _invalidate_definitions_cache between releasing this lock and the
+        # return, which would null the global and surface None to the caller.
+        return defs
 
 
 def _invalidate_definitions_cache() -> None:
@@ -598,25 +612,27 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             text_stripped_lower = text.strip().lower()
         score = 0
 
-        # Available options: exact (90) or word match (75); break on first hit
+        # Available options: exact (90) is the max for this loop, so break on
+        # exact only; for substring (75), upgrade and keep scanning so a later
+        # exact match isn't missed (e.g. options=["AB", "ABC"], text="ABC").
         for opt_lower_strip, opt_pattern in options:
             if opt_lower_strip == text_stripped_lower:
-                score = 90 if score < 90 else score
+                if score < 90:
+                    score = 90
                 break
-            if opt_pattern.search(text):
-                score = 75 if score < 75 else score
-                break
+            if score < 75 and opt_pattern.search(text):
+                score = 75
 
-        # Examples: exact (95) or substring (80); break on first hit
+        # Examples: exact (95) is the max; substring (80) upgrades only.
+        # Same rationale: examples=["INV", "INV-001"] with text="INV-001"
+        # must score 95, not 80.
         for ex_strip, ex_lower in zip(example_lower_strip, example_lower):
             if ex_strip == text_stripped_lower:
                 if score < 95:
                     score = 95
                 break
-            if ex_lower and ex_lower in text_lower:
-                if score < 80:
-                    score = 80
-                break
+            if score < 80 and ex_lower and ex_lower in text_lower:
+                score = 80
 
         # Format heuristics
         if has_date and _DATE_DETECT_HEAD_RE.search(text):
