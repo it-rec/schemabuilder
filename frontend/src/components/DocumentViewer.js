@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { IconButton, Loading } from "@carbon/react";
 import { ChevronLeft, ChevronRight } from "@carbon/react/icons";
 import { getPageImageUrl } from "../services/api";
@@ -11,8 +11,6 @@ export default function DocumentViewer({
 }) {
   const [currentPage, setCurrentPage] = useState(1);
   const [imageDimensions, setImageDimensions] = useState(null);
-  const imageRef = useRef(null);
-  const containerRef = useRef(null);
 
   const numPages = documentData?.num_pages || 1;
 
@@ -20,6 +18,12 @@ export default function DocumentViewer({
     setCurrentPage(1);
     setImageDimensions(null);
   }, [docId]);
+
+  // Clear dimensions when the page changes too: the next image hasn't loaded
+  // yet, and using prior-page dims for the highlight overlay misplaces it.
+  useEffect(() => {
+    setImageDimensions(null);
+  }, [currentPage]);
 
   // Navigate to the highlighted field's page
   useEffect(() => {
@@ -137,7 +141,7 @@ export default function DocumentViewer({
   }
 
   return (
-    <div className="document-viewer" ref={containerRef}>
+    <div className="document-viewer">
       <div className="document-viewer__toolbar">
         <IconButton
           label="Previous page"
@@ -164,7 +168,6 @@ export default function DocumentViewer({
       <div className="document-viewer__canvas">
         <div className="document-viewer__image-wrapper">
           <img
-            ref={imageRef}
             src={pageImageUrl}
             alt={`Page ${currentPage}`}
             onLoad={handleImageLoad}

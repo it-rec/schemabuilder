@@ -54,10 +54,32 @@ _doc_path_cache: dict = {}
 # lazily and reused across extract calls for the same definition snapshot.
 _signature_cache: dict = {}
 
+# Module-level Docling converter. Construction loads layout/OCR models which is
+# slow; reuse a single instance across documents. Concurrent calls are serialized
+# by `_text_lock` (extraction happens inside it), so sharing is safe.
+_text_converter = None
+_text_converter_lock = threading.Lock()
+
+
+def _file_signature(filepath: Path) -> tuple:
+    """Stable identity for a file's current contents. Used as part of cache
+    keys so replacing a file in place invalidates the cached render/text/PDF.
+    """
+    try:
+        st = filepath.stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return ()
+
 
 def _convert_to_pdf(filepath: Path) -> Optional[Path]:
-    """Convert DOCX/PPTX to PDF using MS Office COM automation. Results are cached."""
-    cache_key = str(filepath)
+    """Convert DOCX/PPTX to PDF using MS Office COM automation. Results are cached.
+
+    Cache key includes the source file's mtime+size so the cache is invalidated
+    when the source is edited or replaced in place.
+    """
+    sig = _file_signature(filepath)
+    cache_key = (str(filepath), sig)
     if cache_key in _pdf_conversion_cache:
         cached = Path(_pdf_conversion_cache[cache_key])
         if cached.exists():
@@ -67,7 +89,10 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
 
     ext = filepath.suffix.lower()
     abs_path = str(filepath.resolve())
-    pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}.pdf"
+    # Include the source extension in the temp PDF name so two source files
+    # that share a stem (e.g. report.docx and report.pptx) don't clobber each
+    # other's converted PDF and serve mixed content via the cache.
+    pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}{ext}.pdf"
 
     if ext == ".docx":
         word = win32com.client.Dispatch("Word.Application")
@@ -145,20 +170,32 @@ def _render_single_page(pdf_path: str, page_no: int) -> Optional[bytes]:
         pdf_doc.close()
 
 
+def _get_text_converter():
+    """Lazily build (and reuse) the Docling DocumentConverter."""
+    global _text_converter
+    if _text_converter is not None:
+        return _text_converter
+    with _text_converter_lock:
+        if _text_converter is not None:
+            return _text_converter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+
+        pdf_pipeline_opts = PdfPipelineOptions()
+        pdf_pipeline_opts.generate_page_images = False
+        pdf_pipeline_opts.images_scale = 2.0
+
+        _text_converter = DocumentConverter(
+            format_options={
+                "pdf": PdfFormatOption(pipeline_options=pdf_pipeline_opts),
+            }
+        )
+    return _text_converter
+
+
 def _extract_text(filepath: Path) -> tuple[list, dict]:
     """Extract text entries using Docling. Returns (text_entries, page_dimensions)."""
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-
-    pdf_pipeline_opts = PdfPipelineOptions()
-    pdf_pipeline_opts.generate_page_images = False
-    pdf_pipeline_opts.images_scale = 2.0
-
-    converter = DocumentConverter(
-        format_options={
-            "pdf": PdfFormatOption(pipeline_options=pdf_pipeline_opts),
-        }
-    )
+    converter = _get_text_converter()
     result = converter.convert(str(filepath))
     doc = result.document
 
@@ -209,7 +246,18 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
                         "b": float(bbox.b),
                     }
                     if hasattr(bbox, "coord_origin"):
-                        entry["bbox"]["coord_origin"] = str(bbox.coord_origin)
+                        # docling-core's CoordOrigin is an Enum; str(member) is
+                        # version-dependent ("BOTTOMLEFT" on Python 3.11+ str-
+                        # based enums, "CoordOrigin.BOTTOMLEFT" on 3.10). Pull
+                        # the underlying value/name so the frontend's
+                        # === "BOTTOMLEFT" check is reliable.
+                        co = bbox.coord_origin
+                        if hasattr(co, "value"):
+                            entry["bbox"]["coord_origin"] = str(co.value)
+                        elif hasattr(co, "name"):
+                            entry["bbox"]["coord_origin"] = co.name
+                        else:
+                            entry["bbox"]["coord_origin"] = str(co)
 
         text_entries.append(entry)
 
@@ -219,15 +267,20 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
 def _get_or_render(filepath: Path) -> dict:
     """Render-only path: opens the PDF and records dimensions. Page images are
     populated on demand by _render_page.
+
+    Cache entries record the source file's signature; if the file changes on
+    disk the entry is rebuilt instead of returning stale page dimensions or a
+    pdf_path that points at an outdated converted PDF.
     """
     doc_id = _get_document_id(filepath.name)
+    sig = _file_signature(filepath)
     cached = _render_cache.get(doc_id)
-    if cached is not None:
+    if cached is not None and cached.get("_sig") == sig:
         return cached
 
     with _render_lock:
         cached = _render_cache.get(doc_id)
-        if cached is not None:
+        if cached is not None and cached.get("_sig") == sig:
             return cached
 
         pdf_path, num_pages, page_dimensions = _open_pdf_metadata(filepath)
@@ -237,6 +290,11 @@ def _get_or_render(filepath: Path) -> dict:
             "page_dimensions": page_dimensions,
             "pdf_path": str(pdf_path) if pdf_path else None,
             "page_images": {},
+            "_sig": sig,
+            # Per-doc lock so two concurrent requests for the same page don't
+            # both run pdfium and rasterize the same bitmap. Different docs
+            # still render in parallel.
+            "_render_lock": threading.Lock(),
         }
     return _render_cache[doc_id]
 
@@ -251,22 +309,31 @@ def _render_page(filepath: Path, page_no: int) -> Optional[bytes]:
     if not pdf_path:
         return None
 
-    png_bytes = _render_single_page(pdf_path, page_no)
-    if png_bytes is not None:
-        page_images[page_no] = png_bytes
-    return png_bytes
+    with data["_render_lock"]:
+        # Re-check under the lock: another caller may have just rendered it.
+        if page_no in page_images:
+            return page_images[page_no]
+        png_bytes = _render_single_page(pdf_path, page_no)
+        if png_bytes is not None:
+            page_images[page_no] = png_bytes
+        return png_bytes
 
 
 def _get_or_extract_text(filepath: Path) -> dict:
-    """Text-extraction path: Docling. Slow on first call, cached thereafter."""
+    """Text-extraction path: Docling. Slow on first call, cached thereafter.
+
+    Cache key carries the source file signature so an edited document
+    re-extracts instead of replaying stale text entries from a prior version.
+    """
     doc_id = _get_document_id(filepath.name)
+    sig = _file_signature(filepath)
     cached = _text_cache.get(doc_id)
-    if cached is not None:
+    if cached is not None and cached.get("_sig") == sig:
         return cached
 
     with _text_lock:
         cached = _text_cache.get(doc_id)
-        if cached is not None:
+        if cached is not None and cached.get("_sig") == sig:
             return cached
         try:
             text_entries, docling_dims = _extract_text(filepath)
@@ -275,6 +342,7 @@ def _get_or_extract_text(filepath: Path) -> dict:
         _text_cache[doc_id] = {
             "text_entries": text_entries,
             "page_dimensions": docling_dims,
+            "_sig": sig,
         }
     return _text_cache[doc_id]
 
@@ -286,6 +354,9 @@ def _find_file(doc_id: str) -> Optional[Path]:
         if p.exists():
             return p
         _doc_path_cache.pop(doc_id, None)
+
+    if not TEST_DOCS_DIR.exists():
+        return None
 
     for f in TEST_DOCS_DIR.iterdir():
         if f.suffix.lower() in SUPPORTED_EXTENSIONS:
@@ -340,7 +411,10 @@ def _load_definitions() -> dict:
         _definitions_signature = sig
         # Stale signature entries are harmless; clear to bound memory.
         _signature_cache.clear()
-    return _definitions_cache
+        # Return the local `defs`: another thread could call
+        # _invalidate_definitions_cache between releasing this lock and the
+        # return, which would null the global and surface None to the caller.
+        return defs
 
 
 def _invalidate_definitions_cache() -> None:
@@ -538,25 +612,27 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             text_stripped_lower = text.strip().lower()
         score = 0
 
-        # Available options: exact (90) or word match (75); break on first hit
+        # Available options: exact (90) is the max for this loop, so break on
+        # exact only; for substring (75), upgrade and keep scanning so a later
+        # exact match isn't missed (e.g. options=["AB", "ABC"], text="ABC").
         for opt_lower_strip, opt_pattern in options:
             if opt_lower_strip == text_stripped_lower:
-                score = 90 if score < 90 else score
+                if score < 90:
+                    score = 90
                 break
-            if opt_pattern.search(text):
-                score = 75 if score < 75 else score
-                break
+            if score < 75 and opt_pattern.search(text):
+                score = 75
 
-        # Examples: exact (95) or substring (80); break on first hit
+        # Examples: exact (95) is the max; substring (80) upgrades only.
+        # Same rationale: examples=["INV", "INV-001"] with text="INV-001"
+        # must score 95, not 80.
         for ex_strip, ex_lower in zip(example_lower_strip, example_lower):
             if ex_strip == text_stripped_lower:
                 if score < 95:
                     score = 95
                 break
-            if ex_lower and ex_lower in text_lower:
-                if score < 80:
-                    score = 80
-                break
+            if score < 80 and ex_lower and ex_lower in text_lower:
+                score = 80
 
         # Format heuristics
         if has_date and _DATE_DETECT_HEAD_RE.search(text):
@@ -789,13 +865,33 @@ def get_definition(def_id: str):
     return {"id": def_id, **defs[def_id]}
 
 
+async def _parse_json_body(request: Request) -> dict:
+    """Parse a request body as a JSON object. Returns 400 on malformed JSON or
+    non-object bodies (null, lists, strings) so endpoints can rely on dict
+    semantics without 500-ing on `.get` against a non-dict."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+    return body
+
+
 @app.post("/api/definitions")
 async def create_definition(request: Request):
     """Upload a new document class definition."""
-    body = await request.json()
-    doc = body.get("document", {})
+    body = await _parse_json_body(request)
+    doc = body.get("document")
+    if not isinstance(doc, dict):
+        raise HTTPException(status_code=400, detail="`document` must be a JSON object")
     doc_type = doc.get("document_type", "untitled")
     def_id = re.sub(r'[^a-z0-9_]', '_', doc_type.lower()).strip('_')
+    if not def_id:
+        raise HTTPException(
+            status_code=400,
+            detail="document_type must contain at least one alphanumeric character",
+        )
 
     DEFINITIONS_DIR.mkdir(parents=True, exist_ok=True)
     filepath = DEFINITIONS_DIR / f"{def_id}.json"
@@ -823,9 +919,9 @@ async def extract_fields(doc_id: str, request: Request):
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    body = await request.json()
+    body = await _parse_json_body(request)
     def_id = body.get("definition_id")
-    if not def_id:
+    if not isinstance(def_id, str) or not def_id:
         raise HTTPException(status_code=400, detail="definition_id is required")
 
     defs = _load_definitions()

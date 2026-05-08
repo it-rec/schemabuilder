@@ -53,28 +53,55 @@ export default function App() {
       .catch(console.error);
   }, []);
 
-  // Load document data when selection changes
+  // Load document data when selection changes. Use a `cancelled` flag so a
+  // slow response from a previously-selected document can't overwrite state
+  // for the doc the user has since switched to.
   useEffect(() => {
     if (!selectedDocId) return;
+    let cancelled = false;
     setLoading(true);
     setDocumentData(null);
     setExtraction(null);
     setHighlightedField(null);
     fetchDocument(selectedDocId)
-      .then(setDocumentData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (!cancelled) setDocumentData(data);
+      })
+      .catch((err) => {
+        if (!cancelled) console.error(err);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedDocId]);
 
-  // Extract fields when document + definition are both available
+  // Extract fields when document + definition are both available. Same
+  // cancellation guard: rapid doc/definition switches can't surface stale
+  // extraction results from a prior pair.
   useEffect(() => {
     if (!selectedDocId || !selectedDefId || !documentData) return;
+    let cancelled = false;
     setExtracting(true);
     setExtraction(null);
+    // Drop any field highlight from the prior definition; its bbox refers to
+    // a field object that no longer exists in the new extraction.
+    setHighlightedField(null);
     extractFields(selectedDocId, selectedDefId)
-      .then(setExtraction)
-      .catch(console.error)
-      .finally(() => setExtracting(false));
+      .then((data) => {
+        if (!cancelled) setExtraction(data);
+      })
+      .catch((err) => {
+        if (!cancelled) console.error(err);
+      })
+      .finally(() => {
+        if (!cancelled) setExtracting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedDocId, selectedDefId, documentData]);
 
   const handleSelect = useCallback((id) => {
