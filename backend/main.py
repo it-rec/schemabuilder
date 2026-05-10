@@ -1,24 +1,34 @@
 """FastAPI backend for the Document Viewer application using Docling."""
 
+import atexit
 import hashlib
 import io
 import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger("schemabuilder")
+# Uvicorn only attaches handlers to its own loggers, so without this our
+# logger.info(...) calls (accelerator banner, converter build details) are
+# silently dropped. Match Uvicorn's default format for visual consistency.
+if not logger.handlers and not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:    %(name)s: %(message)s")
+logger.setLevel(logging.INFO)
 
 # Background workers for prefetch (page render warm-up, text extraction warm-up,
 # converter construction). Two workers is plenty: text extraction is the slow
@@ -29,6 +39,9 @@ _bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Surface the accelerator choice at boot so "is it actually using my GPU?"
+    # is answered without waiting for the first /extract to log it.
+    logger.info("Docling accelerator: %s", _describe_accelerator())
     # Build the Docling converter eagerly in the background so the first
     # /extract request doesn't pay the model-load cost (~seconds on CPU,
     # less on GPU but still non-trivial). Failure here is non-fatal: the
@@ -40,11 +53,65 @@ async def lifespan(_app: FastAPI):
         _bg_executor.shutdown(wait=False, cancel_futures=True)
 
 
+def _describe_accelerator() -> str:
+    """Human-readable label for the accelerator that Docling will pick.
+
+    Mirrors the resolution order in `_resolve_accelerator_device` (env override
+    → CUDA → MPS → CPU) but returns a string so it can be logged at startup
+    without importing docling's heavy AcceleratorDevice enum yet.
+    """
+    forced = (os.getenv("DOCLING_DEVICE") or "").strip().upper()
+    try:
+        import torch  # type: ignore
+    except Exception:
+        return f"{forced or 'CPU'} (torch not installed)"
+
+    cuda_available = bool(getattr(torch.cuda, "is_available", lambda: False)())
+    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+    mps_available = bool(mps_backend and mps_backend.is_available())
+
+    def cuda_label() -> str:
+        try:
+            name = torch.cuda.get_device_name(0)
+            return f"CUDA ({name})"
+        except Exception:
+            return "CUDA"
+
+    if forced == "CUDA":
+        return cuda_label() if cuda_available else "CUDA requested but unavailable; falling back to CPU"
+    if forced == "MPS":
+        return "MPS" if mps_available else "MPS requested but unavailable; falling back to CPU"
+    if forced == "CPU":
+        return "CPU (forced via DOCLING_DEVICE)"
+    if forced and forced != "AUTO":
+        return f"{forced} (unknown; will fall back to AUTO)"
+
+    if cuda_available:
+        return cuda_label()
+    if mps_available:
+        return "MPS"
+    return "CPU"
+
+
 app = FastAPI(title="Document Viewer API", lifespan=lifespan)
+
+
+def _parse_cors_origins() -> list[str]:
+    """Resolve allowed CORS origins from the environment.
+
+    `CORS_ALLOW_ORIGINS` is a comma-separated list. Empty or unset falls back
+    to localhost:3000 (the CRA dev server) so the out-of-the-box experience
+    keeps working without configuration.
+    """
+    raw = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return ["http://localhost:3000"]
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=_parse_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,18 +124,80 @@ TEST_DOCS_DIR = Path(__file__).parent / "test_documents"
 DEFINITIONS_DIR = Path(__file__).parent / "definitions"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
 
+# Hard caps on the per-doc caches so a long-running process or a directory of
+# many files doesn't grow memory (and converted-PDF disk usage) without bound.
+# Local single-user usage almost never hits these; they exist as a safety net.
+_RENDER_CACHE_MAX = int(os.getenv("SCHEMABUILDER_RENDER_CACHE_MAX") or 64)
+_TEXT_CACHE_MAX = int(os.getenv("SCHEMABUILDER_TEXT_CACHE_MAX") or 64)
+_PDF_CONVERSION_CACHE_MAX = int(os.getenv("SCHEMABUILDER_PDF_CACHE_MAX") or 64)
+
+
+def _lru_set(cache: OrderedDict, key, value, max_size: int, on_evict=None) -> None:
+    """Insert into an OrderedDict-backed LRU and evict the oldest if over cap.
+
+    `on_evict(key, value)` is called for each evicted entry — used by the PDF
+    conversion cache to remove the corresponding file from disk so eviction
+    doesn't leak temp files.
+    """
+    if key in cache:
+        cache.move_to_end(key)
+    cache[key] = value
+    while len(cache) > max_size:
+        evicted_key, evicted_value = cache.popitem(last=False)
+        if on_evict is not None:
+            try:
+                on_evict(evicted_key, evicted_value)
+            except Exception:
+                logger.exception("LRU eviction callback failed")
+
+
+def _lru_get(cache: OrderedDict, key):
+    """Read-with-touch helper. Returns None when missing."""
+    value = cache.get(key)
+    if value is not None:
+        cache.move_to_end(key)
+    return value
+
+
 # Render cache: stores PDF path + per-page dimensions; page images are rendered
 # lazily on first request and memoized. Avoids rendering every page when a
 # document is selected (the prior behavior blocked the first request entirely
 # for large documents).
-_render_cache: dict = {}
+_render_cache: "OrderedDict[str, dict]" = OrderedDict()
 _render_lock = threading.Lock()
 # Text-extraction cache: slow, populated lazily on first extraction (Docling).
-_text_cache: dict = {}
+_text_cache: "OrderedDict[str, dict]" = OrderedDict()
 _text_lock = threading.Lock()
-# Cache for DOCX/PPTX → PDF conversions
-_pdf_conversion_cache: dict = {}
+# Cache for DOCX/PPTX → PDF conversions. Evicted entries delete the underlying
+# PDF so we don't leak disk after eviction.
+_pdf_conversion_cache: "OrderedDict[tuple, str]" = OrderedDict()
+_pdf_conversion_lock = threading.Lock()
 _pdf_temp_dir = tempfile.mkdtemp(prefix="schemabuilder_")
+
+
+def _evict_pdf_file(_key, path_str: str) -> None:
+    """Eviction callback for the PDF-conversion LRU: remove the on-disk PDF."""
+    try:
+        p = Path(path_str)
+        if p.exists() and p.is_file():
+            p.unlink()
+    except OSError:
+        logger.exception("Failed to remove evicted converted PDF %s", path_str)
+
+
+def _cleanup_pdf_temp_dir() -> None:
+    """Remove the converted-PDF temp dir on clean process exit.
+
+    The OS cleans /tmp eventually, but on Windows the directory persists
+    across runs and accumulates. Best-effort: don't raise from atexit.
+    """
+    try:
+        shutil.rmtree(_pdf_temp_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+atexit.register(_cleanup_pdf_temp_dir)
 
 # Cached definitions, keyed by per-file (name, mtime, size) signature so
 # the dir is rescanned only when something actually changes on disk.
@@ -122,11 +251,18 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
     """
     sig = _file_signature(filepath)
     cache_key = (str(filepath), sig)
-    if cache_key in _pdf_conversion_cache:
-        cached = Path(_pdf_conversion_cache[cache_key])
+    with _pdf_conversion_lock:
+        cached_path = _lru_get(_pdf_conversion_cache, cache_key)
+    if cached_path is not None:
+        cached = Path(cached_path)
         if cached.exists():
             return cached
+        # Stale entry pointing at a missing file (e.g. temp dir was cleared);
+        # drop it so the convert path below repopulates the cache.
+        with _pdf_conversion_lock:
+            _pdf_conversion_cache.pop(cache_key, None)
 
+    import pythoncom
     import win32com.client
 
     ext = filepath.suffix.lower()
@@ -136,27 +272,40 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
     # other's converted PDF and serve mixed content via the cache.
     pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}{ext}.pdf"
 
-    if ext == ".docx":
-        word = win32com.client.Dispatch("Word.Application")
-        word.Visible = False
-        try:
-            doc = word.Documents.Open(abs_path)
-            doc.SaveAs(str(pdf_path), FileFormat=17)  # 17 = wdFormatPDF
-            doc.Close()
-        finally:
-            word.Quit()
-    elif ext == ".pptx":
-        ppt = win32com.client.Dispatch("PowerPoint.Application")
-        try:
-            presentation = ppt.Presentations.Open(abs_path, WithWindow=False)
-            presentation.SaveAs(str(pdf_path), FileFormat=32)  # 32 = ppSaveAsPDF
-            presentation.Close()
-        finally:
-            ppt.Quit()
-    else:
-        return None
+    # FastAPI dispatches sync endpoints to threadpool workers that have not
+    # initialized COM, so Dispatch() raises "CoInitialize was not called".
+    pythoncom.CoInitialize()
+    try:
+        if ext == ".docx":
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+            try:
+                doc = word.Documents.Open(abs_path)
+                doc.SaveAs(str(pdf_path), FileFormat=17)  # 17 = wdFormatPDF
+                doc.Close()
+            finally:
+                word.Quit()
+        elif ext == ".pptx":
+            ppt = win32com.client.Dispatch("PowerPoint.Application")
+            try:
+                presentation = ppt.Presentations.Open(abs_path, WithWindow=False)
+                presentation.SaveAs(str(pdf_path), FileFormat=32)  # 32 = ppSaveAsPDF
+                presentation.Close()
+            finally:
+                ppt.Quit()
+        else:
+            return None
+    finally:
+        pythoncom.CoUninitialize()
 
-    _pdf_conversion_cache[cache_key] = str(pdf_path)
+    with _pdf_conversion_lock:
+        _lru_set(
+            _pdf_conversion_cache,
+            cache_key,
+            str(pdf_path),
+            _PDF_CONVERSION_CACHE_MAX,
+            on_evict=_evict_pdf_file,
+        )
     return pdf_path
 
 
@@ -422,9 +571,23 @@ def _warm_up_converter():
     Only the no-OCR converter is built up front. The OCR-enabled converter
     loads heavier models and is built lazily the first time a scanned doc
     actually requests it, so users with only digital docs never pay for it.
+
+    Constructing the DocumentConverter is cheap — the expensive part is
+    pipeline init (HF metadata fetch + weight load to GPU). `initialize_pipeline`
+    forces that work to happen here in the background so the first /extract
+    request finds the models already resident on-device.
     """
     try:
-        _get_text_converter(do_ocr=False)
+        import time
+        from docling.datamodel.base_models import InputFormat
+
+        cv = _get_text_converter(do_ocr=False)
+        t0 = time.perf_counter()
+        cv.initialize_pipeline(InputFormat.PDF)
+        logger.info(
+            "Docling pipeline pre-loaded in %.2fs (PDF, no-OCR)",
+            time.perf_counter() - t0,
+        )
     except Exception:
         logger.exception("Docling converter warm-up failed; will retry lazily")
 
@@ -516,17 +679,13 @@ def _get_or_render(filepath: Path) -> dict:
     """
     doc_id = _get_document_id(filepath.name)
     sig = _file_signature(filepath)
-    cached = _render_cache.get(doc_id)
-    if cached is not None and cached.get("_sig") == sig:
-        return cached
-
     with _render_lock:
-        cached = _render_cache.get(doc_id)
+        cached = _lru_get(_render_cache, doc_id)
         if cached is not None and cached.get("_sig") == sig:
             return cached
 
         pdf_path, num_pages, page_dimensions = _open_pdf_metadata(filepath)
-        _render_cache[doc_id] = {
+        entry = {
             "filename": filepath.name,
             "num_pages": max(num_pages, 1),
             "page_dimensions": page_dimensions,
@@ -538,7 +697,8 @@ def _get_or_render(filepath: Path) -> dict:
             # still render in parallel.
             "_render_lock": threading.Lock(),
         }
-    return _render_cache[doc_id]
+        _lru_set(_render_cache, doc_id, entry, _RENDER_CACHE_MAX)
+        return entry
 
 
 def _render_page(filepath: Path, page_no: int) -> Optional[bytes]:
@@ -569,24 +729,30 @@ def _get_or_extract_text(filepath: Path) -> dict:
     """
     doc_id = _get_document_id(filepath.name)
     sig = _file_signature(filepath)
-    cached = _text_cache.get(doc_id)
-    if cached is not None and cached.get("_sig") == sig:
-        return cached
-
     with _text_lock:
-        cached = _text_cache.get(doc_id)
+        cached = _lru_get(_text_cache, doc_id)
         if cached is not None and cached.get("_sig") == sig:
             return cached
-        try:
-            text_entries, docling_dims = _extract_text(filepath)
-        except Exception:
-            text_entries, docling_dims = [], {}
-        _text_cache[doc_id] = {
-            "text_entries": text_entries,
-            "page_dimensions": docling_dims,
-            "_sig": sig,
-        }
-    return _text_cache[doc_id]
+    # Run extraction without holding the text lock so two different docs can
+    # be in flight concurrently. Each Docling call is still serialized inside
+    # the converter itself.
+    try:
+        text_entries, docling_dims = _extract_text(filepath)
+    except Exception:
+        text_entries, docling_dims = [], {}
+    entry = {
+        "text_entries": text_entries,
+        "page_dimensions": docling_dims,
+        "_sig": sig,
+    }
+    with _text_lock:
+        # Another caller may have populated the cache while we were extracting;
+        # prefer the freshest result for the current signature.
+        existing = _lru_get(_text_cache, doc_id)
+        if existing is not None and existing.get("_sig") == sig:
+            return existing
+        _lru_set(_text_cache, doc_id, entry, _TEXT_CACHE_MAX)
+        return entry
 
 
 def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
@@ -1163,65 +1329,122 @@ def get_definition(def_id: str):
     return {"id": def_id, **defs[def_id]}
 
 
-async def _parse_json_body(request: Request) -> dict:
-    """Parse a request body as a JSON object. Returns 400 on malformed JSON or
-    non-object bodies (null, lists, strings) so endpoints can rely on dict
-    semantics without 500-ing on `.get` against a non-dict."""
+@app.delete("/api/definitions/{def_id}")
+def delete_definition(def_id: str):
+    """Remove a document class definition by id.
+
+    Returns 404 if no definition with that id exists. On success the
+    in-memory definitions cache is invalidated so subsequent reads see the
+    deletion immediately.
+    """
+    # def_id maps 1:1 to a filename under DEFINITIONS_DIR. Guard against any
+    # path-traversal weirdness by accepting only the slug shape used for
+    # writing (alphanumerics + underscore).
+    if not re.fullmatch(r'[a-z0-9_]+', def_id):
+        raise HTTPException(status_code=404, detail="Definition not found")
+    filepath = DEFINITIONS_DIR / f"{def_id}.json"
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Definition not found")
     try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Request body must be valid JSON")
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
-    return body
+        filepath.unlink()
+    except OSError as e:
+        logger.exception("Failed to delete definition %s", def_id)
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
+    _invalidate_definitions_cache()
+    return {"id": def_id, "deleted": True}
+
+
+class FieldSpec(BaseModel):
+    """Validation for a single field inside a definition's `document.fields`.
+
+    Extra keys are permitted at every layer so future schema additions don't
+    require a server update. `fields` is recursive to support `type: array`.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str = Field(min_length=1)
+    type: Optional[str] = None
+    description: Optional[str] = None
+    extraction_instructions: Optional[str] = None
+    examples: Optional[List[Any]] = None
+    available_options: Optional[List[Any]] = None
+    affix: Optional[bool] = None
+    fields: Optional[List["FieldSpec"]] = None
+
+
+FieldSpec.model_rebuild()
+
+
+class DocumentSpec(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    document_type: str = Field(min_length=1)
+    document_description: Optional[str] = None
+    fields: List[FieldSpec] = Field(default_factory=list)
+
+
+class DefinitionBody(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    document: DocumentSpec
+
+
+class ExtractRequest(BaseModel):
+    definition_id: str = Field(min_length=1)
+
+
+def _slugify_document_type(doc_type: str) -> str:
+    return re.sub(r'[^a-z0-9_]', '_', doc_type.lower()).strip('_')
 
 
 @app.post("/api/definitions")
-async def create_definition(request: Request):
-    """Upload a new document class definition."""
-    body = await _parse_json_body(request)
-    doc = body.get("document")
-    if not isinstance(doc, dict):
-        raise HTTPException(status_code=400, detail="`document` must be a JSON object")
-    doc_type = doc.get("document_type", "untitled")
-    def_id = re.sub(r'[^a-z0-9_]', '_', doc_type.lower()).strip('_')
+def create_definition(body: DefinitionBody):
+    """Upload a new document class definition.
+
+    Validated by Pydantic before this runs: missing/empty `document.document_type`
+    or malformed `document.fields` returns 422 instead of crashing the matcher
+    at extract time.
+    """
+    doc_type = body.document.document_type
+    def_id = _slugify_document_type(doc_type)
     if not def_id:
         raise HTTPException(
             status_code=400,
             detail="document_type must contain at least one alphanumeric character",
         )
 
+    # Persist the original (validated) body — `model_dump` keeps `extra` keys
+    # such as target_tables, source_candidates, etc. that downstream consumers
+    # rely on.
+    payload = body.model_dump(exclude_none=False)
     DEFINITIONS_DIR.mkdir(parents=True, exist_ok=True)
     filepath = DEFINITIONS_DIR / f"{def_id}.json"
     with open(filepath, "w") as f:
-        json.dump(body, f, indent=2)
+        json.dump(payload, f, indent=2)
 
     _invalidate_definitions_cache()
 
     return {
         "id": def_id,
         "document_type": doc_type,
-        "field_count": len(doc.get("fields", [])),
+        "field_count": len(body.document.fields),
     }
 
 
 @app.post("/api/documents/{doc_id}/extract")
-async def extract_fields(doc_id: str, request: Request):
+def extract_fields(doc_id: str, body: ExtractRequest):
     """Extract fields from a document using a definition.
 
-    Triggers Docling text extraction lazily on first call per document.
-    Returns Docling's page_dimensions so the client can render bbox overlays
-    in the same coordinate space as the field bboxes.
+    Sync `def` (not async) so FastAPI dispatches this to the threadpool;
+    Docling's `convert` blocks the calling thread, and using `async def` here
+    would freeze the event loop for the duration of every other request.
     """
     filepath = _find_file(doc_id)
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    body = await _parse_json_body(request)
-    def_id = body.get("definition_id")
-    if not isinstance(def_id, str) or not def_id:
-        raise HTTPException(status_code=400, detail="definition_id is required")
-
+    def_id = body.definition_id
     defs = _load_definitions()
     if def_id not in defs:
         raise HTTPException(status_code=404, detail="Definition not found")
