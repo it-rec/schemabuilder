@@ -1,0 +1,26 @@
+# Force LF in the working tree for all text files, on every platform.
+# `text=auto` lets Git autodetect text vs binary; `eol=lf` then pins line
+# endings to LF on checkout, overriding any local `core.autocrlf` setting.
+# This is what silences the "LF will be replaced by CRLF" warnings on Windows.
+* text=auto eol=lf
+
+# Be explicit about known binary formats so Git never attempts normalization
+# on them (autodetect is usually right, but explicit is safer for content
+# we definitely don't want touched).
+*.pdf  binary
+*.docx binary
+*.pptx binary
+*.xlsx binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff  binary
+*.woff2 binary
+*.zip  binary
+
+# Windows-only scripts: leaving as CRLF tends to be friendlier for
+# double-click execution from Explorer.
+*.bat text eol=crlf
+*.cmd text eol=crlf
