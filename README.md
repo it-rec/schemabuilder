@@ -94,21 +94,27 @@ schemabuilder/
 | `SCHEMABUILDER_RENDER_CACHE_MAX` | `64` | Max cached rendered-page entries (LRU) |
 | `SCHEMABUILDER_TEXT_CACHE_MAX` | `64` | Max cached text-extraction entries (LRU) |
 | `SCHEMABUILDER_PDF_CACHE_MAX` | `64` | Max cached DOCX/PPTX→PDF conversions (LRU; evicting also deletes the on-disk temp PDF) |
+| `SCHEMABUILDER_SHUTDOWN_GRACE` | `30` | Seconds the lifespan finalizer waits for in-flight `/extract` calls to finish on SIGTERM before tearing down the converter |
 
-The accelerator chosen at startup is logged once, so the answer to "is it actually using my GPU?" appears in the server log without waiting for the first `/extract`.
+The accelerator chosen at startup is logged once, so the answer to "is it actually using my GPU?" appears in the server log without waiting for the first `/extract`. Every response includes an `X-Request-ID` header (echoed from the incoming `X-Request-ID` if present, otherwise generated); log lines emitted while handling a request are prefixed with the same id so a single failed call can be traced end-to-end.
 
 ## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/documents` | List documents in `test_documents/` |
+| `GET` | `/health` | Liveness/readiness probe. Returns directory existence + warm-up + in-flight count |
+| `GET` | `/metrics` | Cache utilization, hit/miss counters, OCR decisions, completed extractions |
+| `GET` | `/api/documents` | List documents in `test_documents/`. Paginated: `?limit=100&offset=0`. Response: `{items, total, limit, offset}` |
 | `GET` | `/api/documents/{doc_id}` | Document metadata (number of pages, dimensions) |
-| `GET` | `/api/documents/{doc_id}/pages/{page_no}` | Rasterized page PNG (ETag + max-age caching) |
-| `POST` | `/api/documents/{doc_id}/extract` | Run Docling extraction + field matching for a definition. Body: `{"definition_id": "..."}` |
-| `GET` | `/api/definitions` | List uploaded definitions |
+| `GET` | `/api/documents/{doc_id}/pages/{page_no}` | Rasterized page PNG (ETag + max-age caching). `page_no` validated `>= 1`; out-of-range returns 400 |
+| `POST` | `/api/documents/{doc_id}/extract` | Run Docling extraction + field matching for a definition. Body: `{"definition_id": "..."}`. Each field carries `match_reason` (e.g. `example_exact`, `date_format`, `option_substring`) and `match_score`. Surfaces `extraction_error` if Docling raised |
+| `GET` | `/api/definitions` | List uploaded definitions. Paginated like `/api/documents` |
 | `GET` | `/api/definitions/{def_id}` | Fetch a definition |
-| `POST` | `/api/definitions` | Upload a definition. Validated against a Pydantic schema before being written to disk |
+| `POST` | `/api/definitions` | Upload a definition. Validated against a Pydantic schema. Returns `409 Conflict` if the slug already exists; pass `?overwrite=true` to force-replace |
+| `PATCH` | `/api/definitions/{def_id}` | Replace an existing definition. Returns `404` if the id is unknown (use POST to create) |
 | `DELETE` | `/api/definitions/{def_id}` | Remove a definition |
+
+All write paths on `/api/definitions` (POST/PATCH/DELETE) serialize on a single lock and publish via an atomic temp-file + `os.replace`, so concurrent mutations can't tear a JSON file or leave the in-memory cache observing a half-written state.
 
 ## Tests
 
@@ -119,9 +125,13 @@ cd backend
 python -m pytest tests/
 ```
 
-Frontend (CRA + Jest):
+Frontend (CRA + Jest, plus ESLint with hooks/a11y plugins):
 
 ```bash
 cd frontend
-npm test
+npm test           # interactive
+npm run test:ci    # one-shot for CI
+npm run lint
 ```
+
+CI runs both suites on push/PR via `.github/workflows/ci.yml`.

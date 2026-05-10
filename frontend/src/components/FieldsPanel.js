@@ -84,6 +84,20 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
   const handleClick = useCallback(() => {
     if (isArray) setExpanded((e) => !e);
   }, [isArray]);
+  // Mirror the click handler so keyboard users (Tab to focus, Space/Enter to
+  // toggle) can expand array fields. Non-array headers ignore the keypress;
+  // they're focusable so screen-reader users still get the hover-highlight
+  // affordance via focus, but pressing keys is a no-op.
+  const handleKeyDown = useCallback(
+    (e) => {
+      if (!isArray) return;
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        setExpanded((prev) => !prev);
+      }
+    },
+    [isArray]
+  );
 
   return (
     <li className="fields-panel__field">
@@ -91,7 +105,19 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
         className={`fields-panel__field-header ${hasValue || hasItems ? "fields-panel__field-header--matched" : ""}`}
         onMouseEnter={handleEnter}
         onMouseLeave={handleLeave}
-        onClick={handleClick}
+        // Array headers are interactive (click/keyboard to expand) so they
+        // get button semantics + focus. Non-array headers are visual only:
+        // hover-highlight uses mouse events; keyboard users get the same
+        // affordance by tabbing into the field-value, not into the header.
+        {...(isArray
+          ? {
+              onClick: handleClick,
+              onKeyDown: handleKeyDown,
+              role: "button",
+              tabIndex: 0,
+              "aria-expanded": expanded,
+            }
+          : {})}
         data-testid={`field-${field.name}`}
       >
         <div className="fields-panel__field-label-row">
@@ -218,6 +244,19 @@ export default function FieldsPanel({
         <p className="fields-panel__description">
           {extraction.document_description}
         </p>
+      )}
+      {extraction.extraction_error && (
+        <div
+          className="fields-panel__error"
+          role="alert"
+          data-testid="extraction-error"
+        >
+          <WarningFilled size={16} />
+          <span>
+            Text extraction failed: {extraction.extraction_error}. Matches below
+            are based on no extracted text.
+          </span>
+        </div>
       )}
       <ul className="fields-panel__list">
         {fields.map((field) => (

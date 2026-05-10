@@ -4,7 +4,6 @@ Docling text extraction is mocked so the suite doesn't load ML models. The
 tests focus on routing, request validation (Pydantic 422s), and the
 CRUD lifecycle for definitions.
 """
-import json
 from pathlib import Path
 
 import pytest
@@ -15,13 +14,23 @@ import main
 
 @pytest.fixture
 def client(tmp_path: Path, monkeypatch):
-    """Isolated app instance: definitions dir is a tmp dir, caches start empty."""
+    """Isolated app instance: definitions dir is a tmp dir, caches start empty.
+
+    Each test gets a fresh tmp_path so /api/definitions starts empty and
+    POSTs never collide with leftover state from a previous test. We also
+    null out module-level metrics counters and the OCR-decision cache so
+    cross-test ordering doesn't affect assertions.
+    """
     monkeypatch.setattr(main, "DEFINITIONS_DIR", tmp_path / "definitions")
     monkeypatch.setattr(main, "TEST_DOCS_DIR", tmp_path / "docs")
     main._invalidate_definitions_cache()
     main._render_cache.clear()
     main._text_cache.clear()
     main._doc_path_cache.clear()
+    main._ocr_decision_cache.clear()
+    with main._metrics_lock:
+        for key in list(main._metrics.keys()):
+            main._metrics[key] = 0
     return TestClient(main.app)
 
 
@@ -55,7 +64,8 @@ def test_create_definition_persists_and_lists(client, tmp_path: Path):
     assert body["field_count"] == 2
 
     listing = client.get("/api/definitions").json()
-    assert any(d["id"] == "test_type" for d in listing)
+    assert listing["total"] == 1
+    assert any(d["id"] == "test_type" for d in listing["items"])
 
 
 def test_create_definition_rejects_non_object_body(client):
@@ -184,3 +194,221 @@ def test_extract_runs_matcher_with_mocked_docling(client, tmp_path, monkeypatch)
     inv_field = next(f for f in body["fields"] if f["name"] == "invoice_id")
     assert inv_field["extracted_value"] == "INV-001"
     assert inv_field["confidence"] >= 0.9
+    # Match observability: a successful match must record why it scored.
+    assert inv_field["match_reason"] == "example_exact"
+    assert inv_field["match_score"] >= 90
+    # No extraction error on the happy path.
+    assert "extraction_error" not in body
+
+
+# ── pagination ───────────────────────────────────────────────────────────
+
+
+def test_list_documents_paginates(client, monkeypatch, tmp_path: Path):
+    docs_dir = main.TEST_DOCS_DIR
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(5):
+        (docs_dir / f"doc{i}.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    body = client.get("/api/documents?limit=2&offset=1").json()
+    assert body["total"] == 5
+    assert body["limit"] == 2
+    assert body["offset"] == 1
+    assert len(body["items"]) == 2
+
+
+def test_list_documents_rejects_bad_pagination(client):
+    assert client.get("/api/documents?limit=0").status_code == 422
+    assert client.get("/api/documents?limit=1000").status_code == 422
+    assert client.get("/api/documents?offset=-1").status_code == 422
+
+
+def test_list_definitions_paginates(client):
+    # Seed three definitions with distinct slugs.
+    for name in ("Alpha", "Bravo", "Charlie"):
+        body = _valid_definition()
+        body["document"]["document_type"] = name
+        client.post("/api/definitions", json=body)
+    listing = client.get("/api/definitions?limit=2&offset=0").json()
+    assert listing["total"] == 3
+    assert len(listing["items"]) == 2
+
+
+# ── POST conflict + overwrite + PATCH ────────────────────────────────────
+
+
+def test_create_definition_returns_409_on_duplicate(client):
+    assert client.post("/api/definitions", json=_valid_definition()).status_code == 200
+    resp = client.post("/api/definitions", json=_valid_definition())
+    assert resp.status_code == 409
+    assert "already exists" in resp.json()["detail"].lower()
+
+
+def test_create_definition_overwrites_with_query_flag(client):
+    client.post("/api/definitions", json=_valid_definition())
+    updated = _valid_definition()
+    updated["document"]["document_description"] = "rewritten"
+    resp = client.post("/api/definitions?overwrite=true", json=updated)
+    assert resp.status_code == 200
+    fetched = client.get("/api/definitions/test_type").json()
+    assert fetched["document"]["document_description"] == "rewritten"
+
+
+def test_patch_definition_updates_existing(client):
+    client.post("/api/definitions", json=_valid_definition())
+    updated = _valid_definition()
+    updated["document"]["document_description"] = "patched"
+    resp = client.patch("/api/definitions/test_type", json=updated)
+    assert resp.status_code == 200
+    fetched = client.get("/api/definitions/test_type").json()
+    assert fetched["document"]["document_description"] == "patched"
+
+
+def test_patch_definition_404_for_missing(client):
+    resp = client.patch("/api/definitions/missing", json=_valid_definition())
+    assert resp.status_code == 404
+
+
+def test_patch_definition_rejects_bad_slug(client):
+    # Slashes / non-slug characters must 404 before unlink/open is attempted.
+    resp = client.patch("/api/definitions/..%2Fmain", json=_valid_definition())
+    assert resp.status_code == 404
+
+
+# ── /health and /metrics ────────────────────────────────────────────────
+
+
+def test_health_endpoint(client):
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert "inflight_extracts" in body
+
+
+def test_metrics_endpoint_shape(client):
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "counters" in body
+    assert "caches" in body
+    assert "render" in body["caches"]
+    assert "text" in body["caches"]
+
+
+# ── Request ID middleware ────────────────────────────────────────────────
+
+
+def test_request_id_echoed_when_supplied(client):
+    resp = client.get("/health", headers={"X-Request-ID": "abc123"})
+    assert resp.headers.get("X-Request-ID") == "abc123"
+
+
+def test_request_id_generated_when_missing(client):
+    resp = client.get("/health")
+    rid = resp.headers.get("X-Request-ID")
+    assert rid and len(rid) >= 8
+
+
+# ── page_no validation ──────────────────────────────────────────────────
+
+
+def test_page_no_rejects_zero_and_negative(client):
+    # Need a doc on disk to even reach the page-number validation? No — FastAPI
+    # validates path params before the handler runs, so 422 fires immediately.
+    assert client.get("/api/documents/anyid/pages/0").status_code == 422
+    assert client.get("/api/documents/anyid/pages/-1").status_code == 422
+
+
+def test_page_no_rejects_out_of_range(client, monkeypatch):
+    # Doc exists, but page_no exceeds num_pages — 400, not 404.
+    docs_dir = main.TEST_DOCS_DIR
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    doc_path = docs_dir / "tiny.pdf"
+    doc_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    doc_id = main._get_document_id(doc_path.name)
+    main._render_cache[doc_id] = {
+        "filename": doc_path.name,
+        "num_pages": 1,
+        "page_dimensions": {1: {"width": 100, "height": 100}},
+        "pdf_path": str(doc_path),
+        "page_images": {},
+        "_sig": main._file_signature(doc_path),
+    }
+    resp = client.get(f"/api/documents/{doc_id}/pages/50")
+    assert resp.status_code == 400
+    assert "out of range" in resp.json()["detail"].lower()
+
+
+# ── extraction error surfacing ──────────────────────────────────────────
+
+
+def test_extraction_error_surfaces_in_response(client, monkeypatch):
+    docs_dir = main.TEST_DOCS_DIR
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    doc_path = docs_dir / "bad.pdf"
+    doc_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    doc_id = main._get_document_id(doc_path.name)
+    main._render_cache[doc_id] = {
+        "filename": doc_path.name,
+        "num_pages": 1,
+        "page_dimensions": {1: {"width": 100, "height": 100}},
+        "pdf_path": str(doc_path),
+        "page_images": {},
+        "_sig": main._file_signature(doc_path),
+    }
+
+    def boom(_filepath):
+        raise RuntimeError("docling exploded")
+
+    monkeypatch.setattr(main, "_extract_text", boom)
+    client.post("/api/definitions", json=_valid_definition())
+    resp = client.post(
+        f"/api/documents/{doc_id}/extract",
+        json={"definition_id": "test_type"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "extraction_error" in body
+    assert "docling exploded" in body["extraction_error"]
+    # Fields list is still present so the UI can render its empty state.
+    assert isinstance(body["fields"], list)
+
+
+def test_extraction_error_is_not_cached(client, monkeypatch):
+    """A transient extraction failure must not poison the cache; the next
+    call should retry rather than replaying the empty result."""
+    docs_dir = main.TEST_DOCS_DIR
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    doc_path = docs_dir / "flaky.pdf"
+    doc_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    doc_id = main._get_document_id(doc_path.name)
+    main._render_cache[doc_id] = {
+        "filename": doc_path.name,
+        "num_pages": 1,
+        "page_dimensions": {1: {"width": 100, "height": 100}},
+        "pdf_path": str(doc_path),
+        "page_images": {},
+        "_sig": main._file_signature(doc_path),
+    }
+
+    calls = {"n": 0}
+
+    def flaky(_filepath):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("first call fails")
+        return ([], {})
+
+    monkeypatch.setattr(main, "_extract_text", flaky)
+    client.post("/api/definitions", json=_valid_definition())
+    body1 = client.post(
+        f"/api/documents/{doc_id}/extract",
+        json={"definition_id": "test_type"},
+    ).json()
+    assert "extraction_error" in body1
+    body2 = client.post(
+        f"/api/documents/{doc_id}/extract",
+        json={"definition_id": "test_type"},
+    ).json()
+    assert "extraction_error" not in body2
+    assert calls["n"] == 2

@@ -3,14 +3,12 @@
 These exercise the cache-keying, slug, and matcher logic without loading
 Docling models or rendering any PDFs.
 """
-import os
 import time
 from pathlib import Path
 
 import pytest
 
 import main
-
 
 # ── file signature & document id ─────────────────────────────────────────
 
@@ -183,3 +181,78 @@ def test_lru_eviction_callback_runs():
     main._lru_set(cache, "a", 10, max_size=1, on_evict=lambda k, v: evicted.append((k, v)))
     main._lru_set(cache, "b", 20, max_size=1, on_evict=lambda k, v: evicted.append((k, v)))
     assert evicted == [("a", 10)]
+
+
+# ── _track_inflight counter ──────────────────────────────────────────────
+
+
+def test_track_inflight_increments_and_decrements():
+    start = main._inflight_extracts
+    with main._track_inflight():
+        assert main._inflight_extracts == start + 1
+    assert main._inflight_extracts == start
+
+
+def test_track_inflight_decrements_on_exception():
+    start = main._inflight_extracts
+    with pytest.raises(RuntimeError):
+        with main._track_inflight():
+            raise RuntimeError("simulated handler failure")
+    assert main._inflight_extracts == start
+
+
+# ── matcher observability ──────────────────────────────────────────────
+
+
+def test_match_field_reports_reason_for_exact_example():
+    field = {"name": "invoice_id", "examples": ["INV-2024-001"]}
+    entries = [_entry(0, "INV-2024-001")]
+    result = main._match_field_to_entries(field, entries, used_ids=set())
+    assert result["match_reason"] == "example_exact"
+    assert result["match_score"] == 95
+
+
+def test_match_field_reports_reason_for_date_heuristic():
+    field = {"name": "invoice_date", "examples": ["2024-02-04"]}
+    entries = [_entry(0, "Issued on 2024-02-04 by ACME")]
+    result = main._match_field_to_entries(field, entries, used_ids=set())
+    # Substring then upgrade to date heuristic
+    assert result["match_reason"] == "date_format"
+    assert result["match_score"] == 85
+
+
+def test_match_field_no_match_has_null_reason():
+    field = {"name": "invoice_id", "examples": ["INV-2024-001"]}
+    entries = [_entry(0, "unrelated body text")]
+    result = main._match_field_to_entries(field, entries, used_ids=set())
+    assert result["match_reason"] is None
+    assert result["match_score"] == 0
+
+
+# ── atomic JSON write ──────────────────────────────────────────────────
+
+
+def test_atomic_write_json_replaces_existing(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(main, "DEFINITIONS_DIR", tmp_path)
+    target = tmp_path / "x.json"
+    target.write_text('{"old": true}')
+    main._atomic_write_json(target, {"new": True})
+    import json as _json
+
+    assert _json.loads(target.read_text()) == {"new": True}
+
+
+def test_atomic_write_json_leaves_no_tmp_after_failure(tmp_path: Path, monkeypatch):
+    """A serialization error must clean up the temp file rather than
+    leaving turds next to the real definitions."""
+    monkeypatch.setattr(main, "DEFINITIONS_DIR", tmp_path)
+    target = tmp_path / "y.json"
+
+    class Unserializable:
+        pass
+
+    with pytest.raises(TypeError):
+        main._atomic_write_json(target, {"bad": Unserializable()})
+    leftovers = [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []
+    assert not target.exists()

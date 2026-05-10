@@ -3,6 +3,11 @@ import { render, screen, waitFor } from "@testing-library/react";
 import App from "../App";
 import * as api from "../services/api";
 
+// `findBy*` queries combine retry + assert into one await and are what the
+// testing-library lint plugin prefers over `await waitFor(() => getBy...)`.
+// `waitFor` is reserved below for assertions that aren't element lookups
+// (e.g. checking that a mocked API function was called).
+
 jest.mock("../services/api");
 
 const mockDocs = [
@@ -44,41 +49,31 @@ beforeEach(() => {
 
 test("renders three panels", async () => {
   render(<App />);
-  await waitFor(() => {
-    expect(screen.getByTestId("document-list-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("document-viewer-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("fields-panel")).toBeInTheDocument();
-  });
+  expect(await screen.findByTestId("document-list-panel")).toBeInTheDocument();
+  expect(await screen.findByTestId("document-viewer-panel")).toBeInTheDocument();
+  expect(await screen.findByTestId("fields-panel")).toBeInTheDocument();
 });
 
 test("loads and displays document list", async () => {
   render(<App />);
-  await waitFor(() => {
-    expect(screen.getByText("sample.pdf")).toBeInTheDocument();
-    expect(screen.getByText("sample.docx")).toBeInTheDocument();
-  });
+  expect(await screen.findByText("sample.pdf")).toBeInTheDocument();
+  expect(await screen.findByText("sample.docx")).toBeInTheDocument();
 });
 
 test("fetches first document on load", async () => {
   render(<App />);
-  await waitFor(() => {
-    expect(api.fetchDocument).toHaveBeenCalledWith("abc123");
-  });
+  await waitFor(() => expect(api.fetchDocument).toHaveBeenCalledWith("abc123"));
 });
 
 test("loads definitions and triggers extraction", async () => {
   render(<App />);
-  await waitFor(() => {
-    expect(api.fetchDefinitions).toHaveBeenCalled();
-  });
-  await waitFor(() => {
-    expect(api.extractFields).toHaveBeenCalledWith("abc123", "invoice");
-  });
+  await waitFor(() => expect(api.fetchDefinitions).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(api.extractFields).toHaveBeenCalledWith("abc123", "invoice")
+  );
 });
 
 test("displays definition selector", async () => {
   render(<App />);
-  await waitFor(() => {
-    expect(screen.getByText("Document class")).toBeInTheDocument();
-  });
+  expect(await screen.findByText("Document class")).toBeInTheDocument();
 });

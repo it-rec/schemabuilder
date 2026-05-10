@@ -1,6 +1,7 @@
 """FastAPI backend for the Document Viewer application using Docling."""
 
 import atexit
+import contextvars
 import hashlib
 import io
 import json
@@ -10,31 +11,75 @@ import re
 import shutil
 import tempfile
 import threading
+import time
+import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
+# Per-request context variable, surfaced into log records via the filter below
+# so every line emitted while handling a request carries the same id without
+# every call site having to pass it through.
+_request_id_ctx: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "schemabuilder_request_id", default="-"
+)
+
+
+class _RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _request_id_ctx.get()
+        return True
+
+
 logger = logging.getLogger("schemabuilder")
 # Uvicorn only attaches handlers to its own loggers, so without this our
 # logger.info(...) calls (accelerator banner, converter build details) are
-# silently dropped. Match Uvicorn's default format for visual consistency.
+# silently dropped. Match Uvicorn's default format and prefix with the request
+# id so emissions during request handling can be correlated.
 if not logger.handlers and not logging.getLogger().handlers:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:    %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s:    %(name)s: [%(request_id)s] %(message)s",
+    )
 logger.setLevel(logging.INFO)
+logger.addFilter(_RequestIdFilter())
 
 # Background workers for prefetch (page render warm-up, text extraction warm-up,
 # converter construction). Two workers is plenty: text extraction is the slow
 # leg and is itself serialized on the shared converter; a second worker handles
 # page rasterization in parallel so the first paint isn't blocked behind it.
 _bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
+
+# Tracking for in-flight `/extract` calls so shutdown can wait for them rather
+# than tearing down the converter mid-request. Use a Condition so we can sleep
+# the lifespan finalizer until every active extraction has finished or until
+# the grace deadline expires.
+_inflight_extracts = 0
+_inflight_cv = threading.Condition()
+_SHUTDOWN_GRACE_SECONDS = float(os.getenv("SCHEMABUILDER_SHUTDOWN_GRACE") or 30)
+
+
+@contextmanager
+def _track_inflight():
+    """Increment/decrement the in-flight extract counter under the condition."""
+    global _inflight_extracts
+    with _inflight_cv:
+        _inflight_extracts += 1
+    try:
+        yield
+    finally:
+        with _inflight_cv:
+            _inflight_extracts -= 1
+            _inflight_cv.notify_all()
 
 
 @asynccontextmanager
@@ -50,6 +95,23 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        # Wait for in-flight `/extract` calls to finish so a SIGTERM mid-run
+        # doesn't kill the Docling pipeline and surface a 5xx to the user.
+        # Bounded by SCHEMABUILDER_SHUTDOWN_GRACE so a wedged extraction can't
+        # hold the process up forever.
+        deadline = time.monotonic() + _SHUTDOWN_GRACE_SECONDS
+        with _inflight_cv:
+            while _inflight_extracts > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Shutdown grace expired with %d in-flight extracts",
+                        _inflight_extracts,
+                    )
+                    break
+                _inflight_cv.wait(timeout=remaining)
+        # Cancel pending prefetch jobs (page warm-up, OCR detection) — these
+        # are best-effort and safe to drop.
         _bg_executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -94,6 +156,40 @@ def _describe_accelerator() -> str:
 
 
 app = FastAPI(title="Document Viewer API", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _request_logging(request: Request, call_next):
+    """Attach a request id to every response and emit a one-line access log.
+
+    Honors a caller-supplied `X-Request-ID` header (so an upstream proxy or
+    test client can correlate logs end-to-end); otherwise generates a short
+    uuid. The id is bound into a ContextVar so any logger.info(...) calls
+    from inside handlers, including those dispatched to the threadpool,
+    are tagged with it.
+    """
+    incoming = request.headers.get("x-request-id")
+    rid = incoming if incoming and len(incoming) <= 64 else uuid.uuid4().hex[:12]
+    token = _request_id_ctx.set(rid)
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Request-ID"] = rid
+        return response
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        # Health checks otherwise drown the access log; keep them silent.
+        if request.url.path not in ("/health", "/metrics"):
+            logger.info(
+                "%s %s -> %d in %.1fms",
+                request.method,
+                request.url.path,
+                status_code,
+                elapsed_ms,
+            )
+        _request_id_ctx.reset(token)
 
 
 def _parse_cors_origins() -> list[str]:
@@ -230,6 +326,25 @@ _ocr_decision_lock = threading.Lock()
 # background pool when the user clicks rapidly through the document list.
 _prefetch_inflight: set = set()
 _prefetch_inflight_lock = threading.Lock()
+
+# Lightweight counters exposed via /metrics. Plain ints under a lock are good
+# enough at this request volume; a real Prometheus client would be overkill.
+_metrics_lock = threading.Lock()
+_metrics: dict = {
+    "render_cache_hits": 0,
+    "render_cache_misses": 0,
+    "text_cache_hits": 0,
+    "text_cache_misses": 0,
+    "text_extraction_errors": 0,
+    "ocr_decisions_on": 0,
+    "ocr_decisions_off": 0,
+    "extractions_completed": 0,
+}
+
+
+def _metrics_inc(key: str, n: int = 1) -> None:
+    with _metrics_lock:
+        _metrics[key] = _metrics.get(key, 0) + n
 
 
 def _file_signature(filepath: Path) -> tuple:
@@ -403,20 +518,20 @@ def _build_text_converter(do_ocr: bool):
     is left on (default) — the field-extraction code in `_match_array_field`
     relies on TableItem detection.
     """
-    from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
 
     # AcceleratorOptions/AcceleratorDevice moved between submodules across
     # docling versions (pipeline_options on 2.14, accelerator_options later).
     try:
         from docling.datamodel.accelerator_options import (  # type: ignore
-            AcceleratorOptions,
             AcceleratorDevice,
+            AcceleratorOptions,
         )
     except ImportError:
         from docling.datamodel.pipeline_options import (  # type: ignore
-            AcceleratorOptions,
             AcceleratorDevice,
+            AcceleratorOptions,
         )
 
     num_threads = int(os.getenv("DOCLING_NUM_THREADS") or os.cpu_count() or 4)
@@ -559,6 +674,7 @@ def _resolve_ocr_decision(filepath: Path) -> bool:
             )
             decision = False
         _ocr_decision_cache[key] = decision
+        _metrics_inc("ocr_decisions_on" if decision else "ocr_decisions_off")
         logger.info(
             "OCR decision for %s: %s", filepath.name, "on" if decision else "off"
         )
@@ -579,6 +695,7 @@ def _warm_up_converter():
     """
     try:
         import time
+
         from docling.datamodel.base_models import InputFormat
 
         cv = _get_text_converter(do_ocr=False)
@@ -682,7 +799,9 @@ def _get_or_render(filepath: Path) -> dict:
     with _render_lock:
         cached = _lru_get(_render_cache, doc_id)
         if cached is not None and cached.get("_sig") == sig:
+            _metrics_inc("render_cache_hits")
             return cached
+        _metrics_inc("render_cache_misses")
 
         pdf_path, num_pages, page_dimensions = _open_pdf_metadata(filepath)
         entry = {
@@ -726,20 +845,33 @@ def _get_or_extract_text(filepath: Path) -> dict:
 
     Cache key carries the source file signature so an edited document
     re-extracts instead of replaying stale text entries from a prior version.
+
+    Errors are NOT cached: returning a dict with `extraction_error` set lets
+    the caller surface the failure to the API, and the next call retries
+    instead of silently replaying a stale empty result.
     """
     doc_id = _get_document_id(filepath.name)
     sig = _file_signature(filepath)
     with _text_lock:
         cached = _lru_get(_text_cache, doc_id)
         if cached is not None and cached.get("_sig") == sig:
+            _metrics_inc("text_cache_hits")
             return cached
+        _metrics_inc("text_cache_misses")
     # Run extraction without holding the text lock so two different docs can
     # be in flight concurrently. Each Docling call is still serialized inside
     # the converter itself.
     try:
         text_entries, docling_dims = _extract_text(filepath)
-    except Exception:
-        text_entries, docling_dims = [], {}
+    except Exception as exc:
+        _metrics_inc("text_extraction_errors")
+        logger.exception("Text extraction failed for %s", filepath.name)
+        return {
+            "text_entries": [],
+            "page_dimensions": {},
+            "_sig": sig,
+            "extraction_error": f"{type(exc).__name__}: {exc}"[:300],
+        }
     entry = {
         "text_entries": text_entries,
         "page_dimensions": docling_dims,
@@ -1024,6 +1156,8 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             "matched_entry_id": None,
             "page": None,
             "bbox": None,
+            "match_reason": None,
+            "match_score": 0,
             "type": "array",
             "fields": field.get("fields", []),
             "items": _match_array_field(field, text_entries, used_ids),
@@ -1042,6 +1176,7 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
 
     best_match = None
     best_score = 0
+    best_reason: Optional[str] = None
 
     for entry in text_entries:
         if entry["id"] in used_ids:
@@ -1055,6 +1190,7 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         if text_stripped_lower is None:
             text_stripped_lower = text.strip().lower()
         score = 0
+        reason: Optional[str] = None
 
         # Available options: exact (90) is the max for this loop, so break on
         # exact only; for substring (75), upgrade and keep scanning so a later
@@ -1063,42 +1199,52 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             if opt_lower_strip == text_stripped_lower:
                 if score < 90:
                     score = 90
+                    reason = "option_exact"
                 break
             if score < 75 and opt_pattern.search(text):
                 score = 75
+                reason = "option_substring"
 
         # Examples: exact (95) is the max; substring (80) upgrades only.
         # Same rationale: examples=["INV", "INV-001"] with text="INV-001"
         # must score 95, not 80.
-        for ex_strip, ex_lower in zip(example_lower_strip, example_lower):
+        for ex_strip, ex_lower in zip(example_lower_strip, example_lower, strict=False):
             if ex_strip == text_stripped_lower:
                 if score < 95:
                     score = 95
+                    reason = "example_exact"
                 break
             if score < 80 and ex_lower and ex_lower in text_lower:
                 score = 80
+                reason = "example_substring"
 
         # Format heuristics
         if has_date and _DATE_DETECT_HEAD_RE.search(text):
             if score < 85:
                 score = 85
+                reason = "date_format"
         if has_id and _ID_DETECT_RE.search(text):
             if score < 85:
                 score = 85
+                reason = "id_format"
         if has_decimal and _DECIMAL_DETECT_RE.search(text):
             if score < 70:
                 score = 70
+                reason = "decimal_format"
         if has_currency_sign and any(s in text for s in _CURRENCY_SIGNS):
             if score < 80:
                 score = 80
+                reason = "currency_sign"
 
         if label and label in text_lower:
             if score < 60:
                 score = 60
+                reason = "label"
 
         if score > best_score:
             best_score = score
             best_match = entry
+            best_reason = reason
 
     result = {
         "name": field["name"],
@@ -1112,6 +1258,11 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         "matched_entry_id": None,
         "page": None,
         "bbox": None,
+        # Why this field matched (or didn't) — useful for tuning heuristics
+        # and for the frontend to show users *which* signal fired. `null`
+        # when nothing scored above threshold.
+        "match_reason": None,
+        "match_score": 0,
     }
 
     if best_match and best_score >= 50:
@@ -1121,6 +1272,8 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         result["matched_entry_id"] = best_match["id"]
         result["page"] = best_match.get("page")
         result["bbox"] = best_match.get("bbox")
+        result["match_reason"] = best_reason
+        result["match_score"] = best_score
 
     return result
 
@@ -1167,22 +1320,30 @@ def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
                 "matched_entry_id": entry["id"],
                 "page": entry.get("page"),
                 "bbox": entry.get("bbox"),
+                "match_reason": None,
+                "match_score": 0,
             }
             if kind == "decimal":
                 match = _DECIMAL_DETECT_RE.search(text)
                 if match:
                     item_field["extracted_value"] = match.group(0)
                     item_field["confidence"] = 0.6
+                    item_field["match_reason"] = "decimal_format"
+                    item_field["match_score"] = 60
             elif kind == "id":
                 match = _ID_DETECT_RE.search(text)
                 if match:
                     item_field["extracted_value"] = match.group(0)
                     item_field["confidence"] = 0.6
+                    item_field["match_reason"] = "id_format"
+                    item_field["match_score"] = 60
             elif kind == "int":
                 match = _INT_WORD_RE.search(text)
                 if match:
                     item_field["extracted_value"] = match.group(0)
                     item_field["confidence"] = 0.5
+                    item_field["match_reason"] = "int_format"
+                    item_field["match_score"] = 50
             item_fields.append(item_field)
 
         if any(f["extracted_value"] for f in item_fields):
@@ -1231,11 +1392,69 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
 # ── API Routes ─────────────────────────────────────────────────────────
 
 
+@app.get("/health")
+def health():
+    """Liveness/readiness probe. Cheap; does not touch Docling or the filesystem
+    beyond what's already in memory.
+    """
+    return {
+        "status": "ok",
+        "definitions_dir_exists": DEFINITIONS_DIR.exists(),
+        "test_docs_dir_exists": TEST_DOCS_DIR.exists(),
+        "converter_warmed": bool(_text_converters),
+        "inflight_extracts": _inflight_extracts,
+    }
+
+
+@app.get("/metrics")
+def metrics():
+    """Snapshot of internal counters and cache utilization. Plain JSON so the
+    frontend or a simple Prometheus exporter can scrape it; format is stable
+    enough to graph but not a public contract.
+    """
+    with _metrics_lock:
+        counters = dict(_metrics)
+    return {
+        "counters": counters,
+        "caches": {
+            "render": {"size": len(_render_cache), "max": _RENDER_CACHE_MAX},
+            "text": {"size": len(_text_cache), "max": _TEXT_CACHE_MAX},
+            "pdf_conversion": {
+                "size": len(_pdf_conversion_cache),
+                "max": _PDF_CONVERSION_CACHE_MAX,
+            },
+            "ocr_decisions": {"size": len(_ocr_decision_cache)},
+            "definitions": {
+                "size": len(_definitions_cache) if _definitions_cache else 0,
+            },
+        },
+        "inflight_extracts": _inflight_extracts,
+    }
+
+
+def _paginate(items: list, limit: int, offset: int) -> dict:
+    """Standard pagination envelope used by both list endpoints.
+
+    Returns the slice plus a total so the frontend can render "N of M" without
+    a second round-trip. `limit` is capped to 500 to keep responses bounded.
+    """
+    total = len(items)
+    end = offset + limit
+    return {"items": items[offset:end], "total": total, "limit": limit, "offset": offset}
+
+
 @app.get("/api/documents")
-def list_documents():
-    """List all available documents."""
+def list_documents(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List documents in the test docs dir, paginated.
+
+    The response is a `{items, total, limit, offset}` envelope rather than a
+    bare array; old callers can still read `items` to get the same shape.
+    """
     if not TEST_DOCS_DIR.exists():
-        return []
+        return _paginate([], limit, offset)
     docs = []
     for f in sorted(TEST_DOCS_DIR.iterdir()):
         if f.suffix.lower() in SUPPORTED_EXTENSIONS:
@@ -1249,7 +1468,7 @@ def list_documents():
                     "size": f.stat().st_size,
                 }
             )
-    return docs
+    return _paginate(docs, limit, offset)
 
 
 @app.get("/api/documents/{doc_id}")
@@ -1275,8 +1494,18 @@ def get_document(doc_id: str):
 
 
 @app.get("/api/documents/{doc_id}/pages/{page_no}")
-def get_page_image(doc_id: str, page_no: int, request: Request):
+def get_page_image(
+    doc_id: str,
+    request: Request,
+    page_no: int = PathParam(..., ge=1, le=10_000),
+):
     """Get a rendered page image as PNG. Pages are rendered on demand and memoized.
+
+    `page_no` is constrained to a sane range so junk like negative numbers or
+    `page_no=999999` is rejected at the route boundary (422) instead of
+    propagating through render and returning a confused 404. The upper bound
+    is intentionally generous; any real PDF that exceeds it would already be
+    a server-side performance problem.
 
     Sends an ETag tied to the file's mtime/size so the browser can revalidate
     cheaply once the max-age expires (or when the user reloads with a warm
@@ -1286,6 +1515,16 @@ def get_page_image(doc_id: str, page_no: int, request: Request):
     filepath = _find_file(doc_id)
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Out-of-range page (e.g. requesting p.50 on a 10-page doc) is a client
+    # mistake; return 400 rather than 404 so callers don't conflate it with
+    # "doc went away".
+    data = _get_or_render(filepath)
+    if page_no > data["num_pages"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"page_no {page_no} out of range (document has {data['num_pages']} pages)",
+        )
 
     sig = _file_signature(filepath)
     sig_token = f"{sig[0]}-{sig[1]}" if sig else "0"
@@ -1305,11 +1544,18 @@ def get_page_image(doc_id: str, page_no: int, request: Request):
 
 
 @app.get("/api/definitions")
-def list_definitions():
-    """List all available document class definitions."""
+def list_definitions(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List document class definitions, paginated.
+
+    Same envelope as /api/documents. Sorted by id for stable pagination.
+    """
     defs = _load_definitions()
     result = []
-    for def_id, data in defs.items():
+    for def_id in sorted(defs.keys()):
+        data = defs[def_id]
         doc = data.get("document", {})
         result.append({
             "id": def_id,
@@ -1317,7 +1563,7 @@ def list_definitions():
             "document_description": doc.get("document_description", ""),
             "field_count": len(doc.get("fields", [])),
         })
-    return result
+    return _paginate(result, limit, offset)
 
 
 @app.get("/api/definitions/{def_id}")
@@ -1329,28 +1575,44 @@ def get_definition(def_id: str):
     return {"id": def_id, **defs[def_id]}
 
 
+_DEF_ID_RE = re.compile(r'[a-z0-9_]+')
+
+
+def _validate_def_id_shape(def_id: str) -> None:
+    """Reject anything that isn't the slug shape produced by `_slugify_document_type`.
+
+    Run before any filesystem access so `..` / slashes / null bytes never even
+    reach `unlink()` or `open()`.
+    """
+    if not _DEF_ID_RE.fullmatch(def_id):
+        raise HTTPException(status_code=404, detail="Definition not found")
+
+
 @app.delete("/api/definitions/{def_id}")
 def delete_definition(def_id: str):
     """Remove a document class definition by id.
 
-    Returns 404 if no definition with that id exists. On success the
-    in-memory definitions cache is invalidated so subsequent reads see the
-    deletion immediately.
+    Returns 404 if no definition with that id exists. The write side of the
+    definitions store (create/patch/delete) is serialized on `_definitions_lock`
+    so two concurrent mutations on the same id can't interleave into a
+    half-written file or torn cache.
     """
-    # def_id maps 1:1 to a filename under DEFINITIONS_DIR. Guard against any
-    # path-traversal weirdness by accepting only the slug shape used for
-    # writing (alphanumerics + underscore).
-    if not re.fullmatch(r'[a-z0-9_]+', def_id):
-        raise HTTPException(status_code=404, detail="Definition not found")
+    _validate_def_id_shape(def_id)
     filepath = DEFINITIONS_DIR / f"{def_id}.json"
-    if not filepath.exists():
-        raise HTTPException(status_code=404, detail="Definition not found")
-    try:
-        filepath.unlink()
-    except OSError as e:
-        logger.exception("Failed to delete definition %s", def_id)
-        raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
-    _invalidate_definitions_cache()
+    with _definitions_lock:
+        if not filepath.exists():
+            raise HTTPException(status_code=404, detail="Definition not found")
+        try:
+            filepath.unlink()
+        except OSError as e:
+            logger.exception("Failed to delete definition %s", def_id)
+            raise HTTPException(status_code=500, detail=f"Failed to delete: {e}") from e
+        # Reset cache state under the same lock so a concurrent /api/definitions
+        # GET can't observe stale post-delete state.
+        global _definitions_cache, _definitions_signature
+        _definitions_cache = None
+        _definitions_signature = None
+        _signature_cache.clear()
     return {"id": def_id, "deleted": True}
 
 
@@ -1398,13 +1660,47 @@ def _slugify_document_type(doc_type: str) -> str:
     return re.sub(r'[^a-z0-9_]', '_', doc_type.lower()).strip('_')
 
 
+def _atomic_write_json(filepath: Path, payload: dict) -> None:
+    """Write JSON to disk via a same-dir temp file + os.replace.
+
+    `open(filepath, 'w')` truncates on open, so a crash mid-write leaves a
+    zero-byte file that breaks the next definitions-cache load. Writing to a
+    sibling temp file and renaming gives us an atomic publish on POSIX and
+    "best-effort atomic" on Windows.
+    """
+    DEFINITIONS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=filepath.stem + ".", suffix=".json.tmp", dir=str(filepath.parent)
+    )
+    try:
+        with os.fdopen(tmp_fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, filepath)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 @app.post("/api/definitions")
-def create_definition(body: DefinitionBody):
+def create_definition(
+    body: DefinitionBody,
+    overwrite: bool = Query(False, description="Allow replacing an existing definition with the same id."),
+):
     """Upload a new document class definition.
 
     Validated by Pydantic before this runs: missing/empty `document.document_type`
     or malformed `document.fields` returns 422 instead of crashing the matcher
     at extract time.
+
+    If a definition with the same slugged id already exists, returns 409
+    Conflict so a duplicate POST on retry doesn't silently overwrite the
+    previous version. Pass `?overwrite=true` (or use PATCH) to replace.
+
+    Write serialized on `_definitions_lock` so two concurrent POSTs can't
+    race each other into a half-written file.
     """
     doc_type = body.document.document_type
     def_id = _slugify_document_type(doc_type)
@@ -1418,16 +1714,52 @@ def create_definition(body: DefinitionBody):
     # such as target_tables, source_candidates, etc. that downstream consumers
     # rely on.
     payload = body.model_dump(exclude_none=False)
-    DEFINITIONS_DIR.mkdir(parents=True, exist_ok=True)
     filepath = DEFINITIONS_DIR / f"{def_id}.json"
-    with open(filepath, "w") as f:
-        json.dump(payload, f, indent=2)
-
-    _invalidate_definitions_cache()
+    with _definitions_lock:
+        if filepath.exists() and not overwrite:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Definition '{def_id}' already exists. "
+                    f"Use PATCH /api/definitions/{def_id} or POST with ?overwrite=true."
+                ),
+            )
+        _atomic_write_json(filepath, payload)
+        global _definitions_cache, _definitions_signature
+        _definitions_cache = None
+        _definitions_signature = None
+        _signature_cache.clear()
 
     return {
         "id": def_id,
         "document_type": doc_type,
+        "field_count": len(body.document.fields),
+    }
+
+
+@app.patch("/api/definitions/{def_id}")
+def patch_definition(def_id: str, body: DefinitionBody):
+    """Replace an existing definition in place.
+
+    Pydantic validates the body the same way `create_definition` does;
+    semantically this is "upsert with id from the URL". Returns 404 if the
+    target doesn't exist (use POST to create), avoiding the foot-gun where a
+    typo in the URL silently creates a new definition under the wrong id.
+    """
+    _validate_def_id_shape(def_id)
+    payload = body.model_dump(exclude_none=False)
+    filepath = DEFINITIONS_DIR / f"{def_id}.json"
+    with _definitions_lock:
+        if not filepath.exists():
+            raise HTTPException(status_code=404, detail="Definition not found")
+        _atomic_write_json(filepath, payload)
+        global _definitions_cache, _definitions_signature
+        _definitions_cache = None
+        _definitions_signature = None
+        _signature_cache.clear()
+    return {
+        "id": def_id,
+        "document_type": body.document.document_type,
         "field_count": len(body.document.fields),
     }
 
@@ -1439,6 +1771,10 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     Sync `def` (not async) so FastAPI dispatches this to the threadpool;
     Docling's `convert` blocks the calling thread, and using `async def` here
     would freeze the event loop for the duration of every other request.
+
+    Tracked via `_track_inflight` so a SIGTERM during a long extraction
+    waits for completion (bounded by SCHEMABUILDER_SHUTDOWN_GRACE) instead
+    of killing the Docling pipeline mid-run.
     """
     filepath = _find_file(doc_id)
     if not filepath:
@@ -1449,11 +1785,13 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     if def_id not in defs:
         raise HTTPException(status_code=404, detail="Definition not found")
 
-    text_data = _get_or_extract_text(filepath)
-    definition = defs[def_id]
-    fields = _extract_fields(definition, text_data["text_entries"], def_id=def_id)
+    with _track_inflight():
+        text_data = _get_or_extract_text(filepath)
+        definition = defs[def_id]
+        fields = _extract_fields(definition, text_data["text_entries"], def_id=def_id)
+        _metrics_inc("extractions_completed")
 
-    return {
+    response: dict = {
         "document_id": doc_id,
         "definition_id": def_id,
         "document_type": definition.get("document", {}).get("document_type", ""),
@@ -1461,6 +1799,13 @@ def extract_fields(doc_id: str, body: ExtractRequest):
         "fields": fields,
         "page_dimensions": text_data["page_dimensions"],
     }
+    # Surface a failure from the Docling pipeline so the frontend can tell
+    # "no matches because nothing matched" apart from "no matches because
+    # extraction errored". The fields list is still returned (empty matches)
+    # so the UI can render its empty state coherently.
+    if text_data.get("extraction_error"):
+        response["extraction_error"] = text_data["extraction_error"]
+    return response
 
 
 if __name__ == "__main__":
