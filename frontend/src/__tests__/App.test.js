@@ -62,14 +62,21 @@ test("loads and displays document list", async () => {
 
 test("fetches first document on load", async () => {
   render(<App />);
-  await waitFor(() => expect(api.fetchDocument).toHaveBeenCalledWith("abc123"));
+  // App now passes an AbortSignal-bearing options object as the second arg.
+  await waitFor(() =>
+    expect(api.fetchDocument).toHaveBeenCalledWith("abc123", expect.any(Object)),
+  );
 });
 
 test("loads definitions and triggers extraction", async () => {
   render(<App />);
   await waitFor(() => expect(api.fetchDefinitions).toHaveBeenCalled());
   await waitFor(() =>
-    expect(api.extractFields).toHaveBeenCalledWith("abc123", "invoice")
+    expect(api.extractFields).toHaveBeenCalledWith(
+      "abc123",
+      "invoice",
+      expect.any(Object),
+    ),
   );
 });
 

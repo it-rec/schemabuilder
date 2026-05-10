@@ -54,10 +54,15 @@ logger.setLevel(logging.INFO)
 logger.addFilter(_RequestIdFilter())
 
 # Background workers for prefetch (page render warm-up, text extraction warm-up,
-# converter construction). Two workers is plenty: text extraction is the slow
-# leg and is itself serialized on the shared converter; a second worker handles
-# page rasterization in parallel so the first paint isn't blocked behind it.
-_bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
+# converter construction). Default to 4: the text-extraction leg is serialized
+# inside Docling, but page rasterization across different docs is parallel-safe
+# and a deeper queue lets a user click through several docs without later
+# clicks waiting for earlier extractions to finish their warm-up. Override via
+# SCHEMABUILDER_PREFETCH_WORKERS for low-memory deployments.
+_PREFETCH_WORKERS = max(1, int(os.getenv("SCHEMABUILDER_PREFETCH_WORKERS") or 4))
+_bg_executor = ThreadPoolExecutor(
+    max_workers=_PREFETCH_WORKERS, thread_name_prefix="prefetch"
+)
 
 # Tracking for in-flight `/extract` calls so shutdown can wait for them rather
 # than tearing down the converter mid-request. Use a Condition so we can sleep
@@ -66,6 +71,24 @@ _bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prefetch")
 _inflight_extracts = 0
 _inflight_cv = threading.Condition()
 _SHUTDOWN_GRACE_SECONDS = float(os.getenv("SCHEMABUILDER_SHUTDOWN_GRACE") or 30)
+
+# Hard cap on concurrent /extract runs. Docling holds a process-global pipeline
+# and is effectively single-threaded per converter; piling on N parallel
+# requests just queues them behind each other and burns memory. Reject extras
+# fast with 503 + Retry-After so the load balancer can shed and clients can
+# back off instead of seeing wall-clock minutes of latency.
+_MAX_CONCURRENT_EXTRACTS = max(1, int(os.getenv("SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS") or 4))
+_extract_semaphore = threading.BoundedSemaphore(_MAX_CONCURRENT_EXTRACTS)
+
+# Cap request body size (bytes). Definitions payloads are tiny in practice; a
+# huge body is either a misconfigured client or an attempt to OOM the matcher
+# by feeding it megabytes of `examples`. Enforced by middleware via
+# Content-Length so we reject before streaming the body into memory.
+_MAX_BODY_BYTES = max(1024, int(os.getenv("SCHEMABUILDER_MAX_BODY_BYTES") or 2_000_000))
+
+# Strict allow-list for X-Request-ID: hex/ascii-safe so we don't propagate
+# header-injection junk into log lines or downstream tracers.
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._\-]{1,64}$")
 
 
 @contextmanager
@@ -169,7 +192,7 @@ async def _request_logging(request: Request, call_next):
     are tagged with it.
     """
     incoming = request.headers.get("x-request-id")
-    rid = incoming if incoming and len(incoming) <= 64 else uuid.uuid4().hex[:12]
+    rid = incoming if incoming and _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex[:12]
     token = _request_id_ctx.set(rid)
     start = time.perf_counter()
     status_code = 500
@@ -190,6 +213,30 @@ async def _request_logging(request: Request, call_next):
                 elapsed_ms,
             )
         _request_id_ctx.reset(token)
+
+
+@app.middleware("http")
+async def _enforce_body_size_limit(request: Request, call_next):
+    """Reject oversized request bodies before they're streamed into memory.
+
+    Trusts Content-Length when present (Starlette's TestClient and any sane
+    HTTP client send it for non-streamed bodies). Streamed/chunked uploads
+    without a length header are not bounded here — Starlette's body parsers
+    have their own ceilings for those.
+    """
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            n = int(cl)
+        except ValueError:
+            return Response(status_code=400, content="Invalid Content-Length")
+        if n > _MAX_BODY_BYTES:
+            _metrics_inc("body_too_large")
+            return Response(
+                status_code=413,
+                content=f"Request body exceeds {_MAX_BODY_BYTES} bytes",
+            )
+    return await call_next(request)
 
 
 def _parse_cors_origins() -> list[str]:
@@ -303,6 +350,14 @@ _definitions_lock = threading.Lock()
 
 # Doc-id → resolved Path cache. Avoids rescanning the docs dir on every request.
 _doc_path_cache: dict = {}
+_doc_path_cache_lock = threading.Lock()
+
+# Cached envelope for /api/documents (see _build_documents_listing). Returned
+# directly when the on-disk dir signature is unchanged so repeated polls from
+# the frontend don't re-stat every file in the dir.
+_doc_listing_cache: Optional[list] = None
+_doc_listing_signature: Optional[tuple] = None
+_doc_listing_lock = threading.Lock()
 
 # Cached signatures per-definition (id, mtime) → list of (kind, pattern). Built
 # lazily and reused across extract calls for the same definition snapshot.
@@ -339,6 +394,13 @@ _metrics: dict = {
     "ocr_decisions_on": 0,
     "ocr_decisions_off": 0,
     "extractions_completed": 0,
+    # Incremented when a request is rejected because the global concurrency
+    # cap is full. A non-zero rate here is a signal to bump
+    # SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS or scale the process out.
+    "extractions_rejected": 0,
+    # Incremented when a request body is rejected for exceeding the
+    # configured size limit (see _enforce_body_size_limit middleware).
+    "body_too_large": 0,
 }
 
 
@@ -681,6 +743,13 @@ def _resolve_ocr_decision(filepath: Path) -> bool:
         return decision
 
 
+# Set once the no-OCR Docling pipeline has finished loading. Used by /ready
+# so a load balancer can hold traffic until the first /extract won't pay the
+# multi-second model-load cost. Liveness (/health) stays decoupled from this:
+# a process that's still warming is alive, just not yet ready to serve.
+_warmup_done = threading.Event()
+
+
 def _warm_up_converter():
     """Background warm-up entrypoint; never raises.
 
@@ -694,8 +763,6 @@ def _warm_up_converter():
     request finds the models already resident on-device.
     """
     try:
-        import time
-
         from docling.datamodel.base_models import InputFormat
 
         cv = _get_text_converter(do_ocr=False)
@@ -707,6 +774,11 @@ def _warm_up_converter():
         )
     except Exception:
         logger.exception("Docling converter warm-up failed; will retry lazily")
+    finally:
+        # Signal ready even on failure: lazy fallback in _get_text_converter
+        # will still serve requests. /ready stays "not ready" only until the
+        # warm-up thread has at least tried.
+        _warmup_done.set()
 
 
 def _extract_text(filepath: Path) -> tuple[list, dict]:
@@ -786,6 +858,15 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
     return text_entries, page_dimensions
 
 
+# Per-doc opening locks. Two concurrent requests for the same uncached doc
+# would both run _open_pdf_metadata (which blocks on Office COM for DOCX/PPTX
+# — minutes of work). The per-doc lock dedupes them; the global _render_lock
+# is held only briefly for cache reads/writes, so different docs open in
+# parallel.
+_render_open_locks: dict = {}
+_render_open_locks_lock = threading.Lock()
+
+
 def _get_or_render(filepath: Path) -> dict:
     """Render-only path: opens the PDF and records dimensions. Page images are
     populated on demand by _render_page.
@@ -796,13 +877,27 @@ def _get_or_render(filepath: Path) -> dict:
     """
     doc_id = _get_document_id(filepath.name)
     sig = _file_signature(filepath)
+
     with _render_lock:
         cached = _lru_get(_render_cache, doc_id)
         if cached is not None and cached.get("_sig") == sig:
             _metrics_inc("render_cache_hits")
             return cached
-        _metrics_inc("render_cache_misses")
 
+    with _render_open_locks_lock:
+        per_doc = _render_open_locks.setdefault(doc_id, threading.Lock())
+
+    with per_doc:
+        # Another caller may have populated the cache while we were waiting
+        # for the per-doc lock; re-check before doing the expensive open.
+        with _render_lock:
+            cached = _lru_get(_render_cache, doc_id)
+            if cached is not None and cached.get("_sig") == sig:
+                _metrics_inc("render_cache_hits")
+                return cached
+
+        # Heavy work outside the global lock so other docs can be served in
+        # parallel. Office COM conversion for DOCX/PPTX can take seconds.
         pdf_path, num_pages, page_dimensions = _open_pdf_metadata(filepath)
         entry = {
             "filename": filepath.name,
@@ -816,7 +911,9 @@ def _get_or_render(filepath: Path) -> dict:
             # still render in parallel.
             "_render_lock": threading.Lock(),
         }
-        _lru_set(_render_cache, doc_id, entry, _RENDER_CACHE_MAX)
+        with _render_lock:
+            _metrics_inc("render_cache_misses")
+            _lru_set(_render_cache, doc_id, entry, _RENDER_CACHE_MAX)
         return entry
 
 
@@ -872,6 +969,13 @@ def _get_or_extract_text(filepath: Path) -> dict:
             "_sig": sig,
             "extraction_error": f"{type(exc).__name__}: {exc}"[:300],
         }
+    # Pre-lower text once at extraction time so the per-/extract matcher loop
+    # doesn't recompute it for every (entry × field) pair. Re-extraction on a
+    # cache miss is rare; per-extract calls are common, so amortize here.
+    for e in text_entries:
+        text = e.get("text", "")
+        e["_text_lower"] = text.lower()
+        e["_text_stripped_lower"] = text.strip().lower()
     entry = {
         "text_entries": text_entries,
         "page_dimensions": docling_dims,
@@ -906,6 +1010,15 @@ def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
                 _render_page(filepath, 1)
             except Exception:
                 logger.exception("Prefetch page-1 render failed for %s", filepath.name)
+            # Warm page 2 too so a click on "next page" finds the bytes
+            # already memoized. Cheap: shares the open PdfDocument inside
+            # _render_page and just rasterizes one extra bitmap.
+            try:
+                meta = _render_cache.get(doc_id)
+                if meta and meta.get("num_pages", 0) >= 2:
+                    _render_page(filepath, 2)
+            except Exception:
+                logger.exception("Prefetch page-2 render failed for %s", filepath.name)
             try:
                 _get_or_extract_text(filepath)
             except Exception:
@@ -924,23 +1037,30 @@ def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
 
 
 def _find_file(doc_id: str) -> Optional[Path]:
-    cached = _doc_path_cache.get(doc_id)
+    with _doc_path_cache_lock:
+        cached = _doc_path_cache.get(doc_id)
     if cached is not None:
         p = Path(cached)
         if p.exists():
             return p
-        _doc_path_cache.pop(doc_id, None)
+        with _doc_path_cache_lock:
+            _doc_path_cache.pop(doc_id, None)
 
     if not TEST_DOCS_DIR.exists():
         return None
 
+    found: Optional[Path] = None
+    pending: dict = {}
     for f in TEST_DOCS_DIR.iterdir():
         if f.suffix.lower() in SUPPORTED_EXTENSIONS:
             fid = _get_document_id(f.name)
-            _doc_path_cache[fid] = str(f)
+            pending[fid] = str(f)
             if fid == doc_id:
-                return f
-    return None
+                found = f
+    if pending:
+        with _doc_path_cache_lock:
+            _doc_path_cache.update(pending)
+    return found
 
 
 # ── Document definitions ──────────────────────────────────────────────
@@ -1370,16 +1490,15 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
 
     candidates = []
     for e in text_entries:
-        text = e.get("text", "")
-        # Annotate with pre-lowered text once, then reuse across all fields.
-        # Use a shallow copy so we don't mutate the cached text_entries list.
-        annotated = e if "_text_lower" in e else {
-            **e,
-            "_text_lower": text.lower(),
-            "_text_stripped_lower": text.strip().lower(),
-        }
-        if _entry_could_match(annotated, signatures):
-            candidates.append(annotated)
+        # Entries pulled from the text cache already carry _text_lower /
+        # _text_stripped_lower (annotated at extraction time). Fall back to
+        # computing here only for entries that bypassed the cache (tests).
+        if "_text_lower" not in e:
+            text = e.get("text", "")
+            e["_text_lower"] = text.lower()
+            e["_text_stripped_lower"] = text.strip().lower()
+        if _entry_could_match(e, signatures):
+            candidates.append(e)
 
     used_ids: set = set()
     results = []
@@ -1394,16 +1513,38 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
 
 @app.get("/health")
 def health():
-    """Liveness/readiness probe. Cheap; does not touch Docling or the filesystem
-    beyond what's already in memory.
+    """Liveness probe. Cheap; does not touch Docling or the filesystem
+    beyond what's already in memory. Always returns 200 if the process is up
+    so an orchestrator can distinguish "stuck" from "still warming" by also
+    polling /ready.
     """
     return {
         "status": "ok",
         "definitions_dir_exists": DEFINITIONS_DIR.exists(),
         "test_docs_dir_exists": TEST_DOCS_DIR.exists(),
         "converter_warmed": bool(_text_converters),
+        "ready": _warmup_done.is_set(),
         "inflight_extracts": _inflight_extracts,
     }
+
+
+@app.get("/ready")
+def ready():
+    """Readiness probe distinct from liveness.
+
+    Returns 200 once the background warm-up has finished (or failed), so a
+    Kubernetes-style readinessProbe can hold traffic away from a freshly
+    started replica until the first /extract won't pay model-load latency.
+    Returns 503 with `Retry-After: 5` while warming so callers back off.
+    """
+    if _warmup_done.is_set():
+        return {"ready": True}
+    return Response(
+        status_code=503,
+        content='{"ready": false}',
+        media_type="application/json",
+        headers={"Retry-After": "5"},
+    )
 
 
 @app.get("/metrics")
@@ -1443,6 +1584,52 @@ def _paginate(items: list, limit: int, offset: int) -> dict:
     return {"items": items[offset:end], "total": total, "limit": limit, "offset": offset}
 
 
+def _docs_dir_signature() -> tuple:
+    """Stable signature for the test docs dir contents. Used to skip rebuilds
+    of the document listing when nothing has changed on disk.
+    """
+    if not TEST_DOCS_DIR.exists():
+        return ()
+    sig = []
+    try:
+        for f in sorted(TEST_DOCS_DIR.iterdir()):
+            if f.suffix.lower() in SUPPORTED_EXTENSIONS:
+                try:
+                    st = f.stat()
+                    sig.append((f.name, st.st_mtime_ns, st.st_size))
+                except OSError:
+                    pass
+    except OSError:
+        return ()
+    return tuple(sig)
+
+
+def _build_documents_listing() -> list:
+    """Materialize the document listing (and refresh _doc_path_cache as a
+    side-effect). Caller is responsible for caching by signature.
+    """
+    docs = []
+    pending: dict = {}
+    for f in sorted(TEST_DOCS_DIR.iterdir()):
+        if f.suffix.lower() in SUPPORTED_EXTENSIONS:
+            doc_id = _get_document_id(f.name)
+            pending[doc_id] = str(f)
+            try:
+                size = f.stat().st_size
+            except OSError:
+                continue
+            docs.append({
+                "id": doc_id,
+                "filename": f.name,
+                "extension": f.suffix.lower(),
+                "size": size,
+            })
+    if pending:
+        with _doc_path_cache_lock:
+            _doc_path_cache.update(pending)
+    return docs
+
+
 @app.get("/api/documents")
 def list_documents(
     limit: int = Query(100, ge=1, le=500),
@@ -1452,22 +1639,24 @@ def list_documents(
 
     The response is a `{items, total, limit, offset}` envelope rather than a
     bare array; old callers can still read `items` to get the same shape.
+    Cached by directory signature so back-to-back GETs (e.g. polling) don't
+    re-stat every file in the dir.
     """
+    global _doc_listing_cache, _doc_listing_signature
     if not TEST_DOCS_DIR.exists():
         return _paginate([], limit, offset)
-    docs = []
-    for f in sorted(TEST_DOCS_DIR.iterdir()):
-        if f.suffix.lower() in SUPPORTED_EXTENSIONS:
-            doc_id = _get_document_id(f.name)
-            _doc_path_cache[doc_id] = str(f)
-            docs.append(
-                {
-                    "id": doc_id,
-                    "filename": f.name,
-                    "extension": f.suffix.lower(),
-                    "size": f.stat().st_size,
-                }
-            )
+
+    sig = _docs_dir_signature()
+    cached = _doc_listing_cache
+    if cached is not None and _doc_listing_signature == sig:
+        return _paginate(cached, limit, offset)
+
+    with _doc_listing_lock:
+        if _doc_listing_cache is not None and _doc_listing_signature == sig:
+            return _paginate(_doc_listing_cache, limit, offset)
+        docs = _build_documents_listing()
+        _doc_listing_cache = docs
+        _doc_listing_signature = sig
     return _paginate(docs, limit, offset)
 
 
@@ -1785,11 +1974,25 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     if def_id not in defs:
         raise HTTPException(status_code=404, detail="Definition not found")
 
-    with _track_inflight():
-        text_data = _get_or_extract_text(filepath)
-        definition = defs[def_id]
-        fields = _extract_fields(definition, text_data["text_entries"], def_id=def_id)
-        _metrics_inc("extractions_completed")
+    # Bounded semaphore prevents pile-on: Docling pipelines hold large model
+    # state and serialize internally, so admitting unlimited concurrent
+    # extractions just queues them while burning RSS. Reject fast with 503
+    # so clients (and any upstream LB) can back off / shed.
+    if not _extract_semaphore.acquire(blocking=False):
+        _metrics_inc("extractions_rejected")
+        raise HTTPException(
+            status_code=503,
+            detail="Too many concurrent extractions; retry shortly.",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        with _track_inflight():
+            text_data = _get_or_extract_text(filepath)
+            definition = defs[def_id]
+            fields = _extract_fields(definition, text_data["text_entries"], def_id=def_id)
+            _metrics_inc("extractions_completed")
+    finally:
+        _extract_semaphore.release()
 
     response: dict = {
         "document_id": doc_id,
