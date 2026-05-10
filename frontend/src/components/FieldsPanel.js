@@ -219,6 +219,19 @@ export default function FieldsPanel({
           {extraction.document_description}
         </p>
       )}
+      {extraction.extraction_error && (
+        <div
+          className="fields-panel__error"
+          role="alert"
+          data-testid="extraction-error"
+        >
+          <WarningFilled size={16} />
+          <span>
+            Text extraction failed: {extraction.extraction_error}. Matches below
+            are based on no extracted text.
+          </span>
+        </div>
+      )}
       <ul className="fields-panel__list">
         {fields.map((field) => (
           <FieldItem

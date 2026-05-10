@@ -6,18 +6,18 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "test_documents")
 
 
 def generate_pdf():
+    from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib.units import inch
     from reportlab.platypus import (
-        SimpleDocTemplate,
+        PageBreak,
         Paragraph,
+        SimpleDocTemplate,
         Spacer,
         Table,
         TableStyle,
-        PageBreak,
     )
-    from reportlab.lib import colors
 
     path = os.path.join(OUTPUT_DIR, "sample.pdf")
     doc = SimpleDocTemplate(path, pagesize=letter)
@@ -102,7 +102,6 @@ def generate_pdf():
 
 def generate_docx():
     from docx import Document
-    from docx.shared import Pt, Inches
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     path = os.path.join(OUTPUT_DIR, "sample.docx")
@@ -177,9 +176,6 @@ def generate_docx():
 
 def generate_pptx():
     from pptx import Presentation
-    from pptx.util import Inches, Pt
-    from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN
 
     path = os.path.join(OUTPUT_DIR, "sample.pptx")
     prs = Presentation()
