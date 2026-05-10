@@ -44,19 +44,19 @@ beforeEach(() => {
 
 test("renders three panels", async () => {
   render(<App />);
-  await waitFor(() => {
-    expect(screen.getByTestId("document-list-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("document-viewer-panel")).toBeInTheDocument();
-    expect(screen.getByTestId("fields-panel")).toBeInTheDocument();
-  });
+  // One assertion per `waitFor` callback — the testing-library rule disallows
+  // multiple assertions in the same callback because a failure in any
+  // assertion forces the whole callback to retry, which obscures which
+  // assertion was actually flaky.
+  await waitFor(() => expect(screen.getByTestId("document-list-panel")).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByTestId("document-viewer-panel")).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByTestId("fields-panel")).toBeInTheDocument());
 });
 
 test("loads and displays document list", async () => {
   render(<App />);
-  await waitFor(() => {
-    expect(screen.getByText("sample.pdf")).toBeInTheDocument();
-    expect(screen.getByText("sample.docx")).toBeInTheDocument();
-  });
+  await waitFor(() => expect(screen.getByText("sample.pdf")).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText("sample.docx")).toBeInTheDocument());
 });
 
 test("fetches first document on load", async () => {
