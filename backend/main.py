@@ -25,7 +25,7 @@ from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from transforms import TransformError, build_export
 
@@ -1214,6 +1214,15 @@ def _build_field_signatures(definition: dict) -> list:
                         ("regex", re.compile(r'\b' + re.escape(str(opt)) + r'\b', re.IGNORECASE))
                     )
 
+            # User-supplied pattern: include in signatures so an entry that
+            # only matches the regex (no example overlap) isn't pre-filtered.
+            raw_pat = field.get("pattern")
+            if isinstance(raw_pat, str) and raw_pat:
+                try:
+                    signatures.append(("regex", re.compile(raw_pat)))
+                except re.error:
+                    pass
+
             label = str(field.get("name", "")).replace("_", " ").lower().strip()
             if label:
                 signatures.append(("literal", label))
@@ -1290,6 +1299,18 @@ def _compile_field_matchers(field: dict) -> dict:
 
     label = str(field.get("name", "")).replace("_", " ").lower()
 
+    # Compile the user-supplied regex once. Validation already happened at
+    # upload time (FieldSpec.field_validator); the try/except here is a belt-
+    # and-suspenders against a definition that bypassed Pydantic somehow
+    # (direct file edit, older format on disk).
+    pattern = None
+    raw_pattern = field.get("pattern")
+    if isinstance(raw_pattern, str) and raw_pattern:
+        try:
+            pattern = re.compile(raw_pattern)
+        except re.error:
+            pattern = None
+
     return {
         "example_lower": example_lower,
         "example_lower_strip": example_lower_strip,
@@ -1299,6 +1320,7 @@ def _compile_field_matchers(field: dict) -> dict:
         "has_id": has_id,
         "has_decimal": has_decimal,
         "has_currency_sign": has_currency_sign,
+        "pattern": pattern,
     }
 
 
@@ -1334,10 +1356,15 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
     has_id = m["has_id"]
     has_decimal = m["has_decimal"]
     has_currency_sign = m["has_currency_sign"]
+    pattern = m["pattern"]
 
     best_match = None
     best_score = 0
     best_reason: Optional[str] = None
+    # When the winning signal is `pattern_match`, store the matched substring
+    # so we can return just the regex hit (e.g. the IBAN) rather than the
+    # entire enclosing text entry. Cleared whenever a non-pattern signal wins.
+    best_pattern_substring: Optional[str] = None
 
     for entry in text_entries:
         if entry["id"] in used_ids:
@@ -1402,10 +1429,25 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
                 score = 60
                 reason = "label"
 
+        # User-supplied pattern: scored 92, between example_substring (80) and
+        # example_exact (95). A hand-crafted regex is a strong signal of
+        # intent — it should beat heuristic format detection but not an exact
+        # example string.
+        pattern_substring: Optional[str] = None
+        if pattern is not None:
+            pm = pattern.search(text)
+            if pm and score < 92:
+                score = 92
+                reason = "pattern_match"
+                pattern_substring = pm.group(1) if pm.groups() else pm.group(0)
+
         if score > best_score:
             best_score = score
             best_match = entry
             best_reason = reason
+            best_pattern_substring = (
+                pattern_substring if reason == "pattern_match" else None
+            )
 
     # Per-field acceptance threshold (0–1). Defaults to 0.5 to preserve the
     # historical 50/100 cutoff. A definition can raise it (strict fields like
@@ -1425,6 +1467,7 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         "extraction_instructions": field.get("extraction_instructions"),
         "available_options": field.get("available_options"),
         "affix": field.get("affix"),
+        "pattern": field.get("pattern") if isinstance(field.get("pattern"), str) else None,
         "min_confidence": raw_threshold
         if isinstance(raw_threshold, (int, float)) and 0.0 <= raw_threshold <= 1.0
         else None,
@@ -1447,7 +1490,13 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
 
     if best_match and best_score >= score_cutoff:
         used_ids.add(best_match["id"])
-        result["extracted_value"] = best_match["text"]
+        # Pattern matches return just the captured substring (the IBAN, the
+        # VAT id, etc.) rather than the surrounding sentence. Other signals
+        # return the full entry text — that's been the contract since day one.
+        if best_reason == "pattern_match" and best_pattern_substring is not None:
+            result["extracted_value"] = best_pattern_substring
+        else:
+            result["extracted_value"] = best_match["text"]
         result["confidence"] = best_score / 100.0
         result["matched_entry_id"] = best_match["id"]
         result["page"] = best_match.get("page")
@@ -1895,7 +1944,25 @@ class FieldSpec(BaseModel):
     # here so a malformed value lands as a 422 instead of getting silently
     # ignored inside the matcher.
     min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # Optional regular expression. When set, any text entry whose text
+    # matches becomes a strong candidate (matcher score 92, between
+    # example_substring=80 and example_exact=95). The matched substring is
+    # what ends up in extracted_value — use a capture group to scope it to
+    # the part you want (e.g. "IBAN: (DE\\d{20})"). Validated as a
+    # compilable Python regex at upload time.
+    pattern: Optional[str] = None
     fields: Optional[List["FieldSpec"]] = None
+
+    @field_validator("pattern")
+    @classmethod
+    def _validate_regex(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"pattern is not a valid regular expression: {e}") from e
+        return v
 
 
 FieldSpec.model_rebuild()

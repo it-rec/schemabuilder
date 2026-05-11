@@ -42,6 +42,9 @@ const EMPTY_FIELD = Object.freeze({
   // means "use server default (50%)" so a freshly created field doesn't
   // bake a specific value into the JSON.
   min_confidence_pct: null,
+  // Optional regex applied to every text entry. Matches score 92 in the
+  // backend matcher and the matched substring becomes the extracted value.
+  pattern: "",
   fields: [],
 });
 
@@ -58,6 +61,7 @@ function pruneField(field) {
   if (field.available_options?.length)
     out.available_options = field.available_options.slice();
   if (field.affix) out.affix = true;
+  if (field.pattern?.trim()) out.pattern = field.pattern.trim();
   // Only emit min_confidence when the user actually set one. Convert from
   // the 0–100 UI value back to the 0–1 backend value, clamped to range.
   if (
@@ -90,8 +94,22 @@ function hydrateField(raw) {
       typeof raw?.min_confidence === "number"
         ? Math.round(raw.min_confidence * 100)
         : null,
+    pattern: typeof raw?.pattern === "string" ? raw.pattern : "",
     fields: Array.isArray(raw?.fields) ? raw.fields.map(hydrateField) : [],
   };
+}
+
+// Cheap client-side regex check so the user gets feedback before posting.
+// Distinct from the backend's authoritative validation: a passing client
+// check still triggers the server check on save.
+function isValidRegex(s) {
+  if (!s) return true;
+  try {
+    new RegExp(s);
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 // Validate the draft synchronously and return a list of human-readable errors.
@@ -114,6 +132,9 @@ function validate(draft) {
           errors.push(`Duplicate field name "${f.name.trim()}" in ${path || "root"}.`);
         }
         seen.add(key);
+      }
+      if (f.pattern && !isValidRegex(f.pattern)) {
+        errors.push(`Field "${f.name || where}" has an invalid regex pattern.`);
       }
       if (f.type === "array") walk(f.fields, `${where}.fields`);
     });
@@ -310,6 +331,17 @@ function FieldEditor({ field, path, onChange, onRemove, depth = 0 }) {
                 update({ min_confidence_pct: Number.isFinite(n) ? n : null });
               }
             }}
+            size="sm"
+          />
+          <TextInput
+            id={`def-field-pattern-${path}`}
+            labelText="Regex pattern (optional)"
+            helperText='e.g. \b[A-Z]{2}\d{20}\b for IBAN, or "DE\d+" for German VAT IDs. Capture group 1 (if present) becomes the extracted value.'
+            placeholder="\\d{4}-\\d{2}-\\d{2}"
+            value={field.pattern}
+            onChange={(e) => update({ pattern: e.target.value })}
+            invalid={!isValidRegex(field.pattern)}
+            invalidText="Not a valid regular expression."
             size="sm"
           />
         </>

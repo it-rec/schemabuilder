@@ -201,6 +201,16 @@ const FieldItem = React.memo(function FieldItem({
               ≥{Math.round(field.min_confidence * 100)}%
             </Tag>
           )}
+          {!isArray && typeof field.pattern === "string" && field.pattern && (
+            <Tag
+              size="sm"
+              type="purple"
+              title={`Regex pattern: ${field.pattern}`}
+              data-testid={`field-pattern-${field.name}`}
+            >
+              regex
+            </Tag>
+          )}
           {isArray && hasItems && (
             <Tag size="sm" type="blue">
               {field.items.length} item{field.items.length !== 1 ? "s" : ""}

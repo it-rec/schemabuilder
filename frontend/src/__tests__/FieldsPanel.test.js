@@ -157,6 +157,27 @@ test("export menu is hidden when no target_tables are present", () => {
   expect(screen.queryByTestId("export-menu")).not.toBeInTheDocument();
 });
 
+test("renders regex tag when field has a pattern", () => {
+  const withPattern = {
+    ...mockExtraction,
+    fields: [
+      { ...mockExtraction.fields[0], pattern: "\\bDE\\d{20}\\b" },
+      ...mockExtraction.fields.slice(1),
+    ],
+  };
+  render(
+    <FieldsPanel extraction={withPattern} onHoverField={() => {}} loading={false} />,
+  );
+  expect(screen.getByTestId("field-pattern-invoice_id")).toHaveTextContent("regex");
+});
+
+test("does not render regex tag when pattern is missing or empty", () => {
+  render(
+    <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />,
+  );
+  expect(screen.queryByTestId("field-pattern-invoice_id")).not.toBeInTheDocument();
+});
+
 test("renders threshold tag when min_confidence is set on the field", () => {
   const withThreshold = {
     ...mockExtraction,

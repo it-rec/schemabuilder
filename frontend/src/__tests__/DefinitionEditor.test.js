@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import DefinitionEditor from "../components/DefinitionEditor";
 import * as api from "../services/api";
@@ -69,6 +69,47 @@ test("create flow: blocks save when document type is empty", async () => {
 
   await user.type(screen.getByLabelText(/Document type/i), "Receipt");
   await waitFor(() => expect(createButton).not.toBeDisabled());
+});
+
+test("edit flow: round-trips regex pattern; invalid pattern blocks save", async () => {
+  const user = userEvent.setup();
+  api.fetchDefinition.mockResolvedValue({
+    document: {
+      document_type: "Doc",
+      fields: [{ name: "iban", pattern: "\\bDE\\d{20}\\b" }],
+    },
+  });
+  api.updateDefinition.mockResolvedValue({ id: "doc" });
+
+  render(
+    <DefinitionEditor
+      open
+      mode="edit"
+      definitionId="doc"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  // Hydrated existing pattern is in the input.
+  const input = await screen.findByLabelText(/Regex pattern/i);
+  expect(input).toHaveValue("\\bDE\\d{20}\\b");
+
+  // Type an invalid regex — Save button disables. Use fireEvent.change here
+  // because userEvent.type parses "[" as a keyboard modifier.
+  fireEvent.change(input, { target: { value: "[unclosed" } });
+  const save = screen.getByRole("button", { name: /Save changes/i });
+  expect(save).toBeDisabled();
+
+  // Fix it and save.
+  fireEvent.change(input, { target: { value: "\\d+" } });
+  expect(save).not.toBeDisabled();
+  await user.click(save);
+
+  await waitFor(() => expect(api.updateDefinition).toHaveBeenCalledTimes(1));
+  const [, payload] = api.updateDefinition.mock.calls[0];
+  expect(payload.document.fields[0].pattern).toBe("\\d+");
 });
 
 test("edit flow: hydrates min_confidence + round-trips it as 0-1 on save", async () => {

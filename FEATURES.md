@@ -72,3 +72,8 @@ Status: ideas captured 2026-05-11. Shipped on branch
   field overrides the default 0.5 cutoff; the editor exposes it as a
   percent input; sub-threshold candidates surface as a "review" hint
   in the panel instead of being silently dropped)
+- #11 Per-field regex pattern (`pattern` slot on each field; matched
+  text scores 92 in the matcher and capture-group 1 — falling back to
+  group 0 — becomes the extracted value, so an IBAN regex returns just
+  the IBAN; Pydantic refuses uncompilable regexes at upload time and
+  the editor surfaces compile errors live)
