@@ -12,7 +12,6 @@ const ONLINE_POLL_MS = 30000;
 //   reloadKey – monotonically increments on every transition into "online".
 //               Consumers put it in a useEffect dep list to force data loads
 //               to re-run once the connection comes back.
-//   retry     – fire an immediate probe (wired to the "Retry now" button).
 export function useConnectionStatus() {
   const [online, setOnline] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
@@ -79,5 +78,5 @@ export function useConnectionStatus() {
     };
   }, [ping]);
 
-  return { online, reloadKey, retry: ping };
+  return { online, reloadKey };
 }
