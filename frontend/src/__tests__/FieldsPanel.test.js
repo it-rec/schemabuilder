@@ -81,7 +81,7 @@ test("shows Not found for unmatched fields", () => {
 });
 
 test("calls onHoverField on mouse enter for matched field", () => {
-  const onHover = jest.fn();
+  const onHover = vi.fn();
   render(
     <FieldsPanel extraction={mockExtraction} onHoverField={onHover} loading={false} />
   );
@@ -90,7 +90,7 @@ test("calls onHoverField on mouse enter for matched field", () => {
 });
 
 test("calls onHoverField with null on mouse leave", () => {
-  const onHover = jest.fn();
+  const onHover = vi.fn();
   render(
     <FieldsPanel extraction={mockExtraction} onHoverField={onHover} loading={false} />
   );
@@ -268,7 +268,7 @@ test("does not render rejected-candidate hint when the field matched", () => {
 });
 
 test("export menu surfaces JSON + per-table CSV options and calls onExport", async () => {
-  const onExport = jest.fn();
+  const onExport = vi.fn();
   const extractionWithTables = {
     ...mockExtraction,
     target_tables: ["Invoice", "line_items"],

@@ -2,7 +2,7 @@ import React from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import DocumentViewer from "../components/DocumentViewer";
 
-jest.mock("../services/api", () => ({
+vi.mock("../services/api", () => ({
   getPageImageUrl: (docId, page) =>
     `http://localhost:8000/api/documents/${docId}/pages/${page}`,
 }));
@@ -144,7 +144,7 @@ test("hovering an overlay calls onHoverField with the underlying field", () => {
       field,
     },
   ];
-  const onHoverField = jest.fn();
+  const onHoverField = vi.fn();
 
   render(
     <DocumentViewer
@@ -214,7 +214,7 @@ test("renders a teach target per text entry on the current page and invokes onTe
       bbox: { l: 50, t: 700, r: 300, b: 680, coord_origin: "BOTTOMLEFT" },
     },
   ];
-  const onTeachEntry = jest.fn();
+  const onTeachEntry = vi.fn();
 
   render(
     <DocumentViewer

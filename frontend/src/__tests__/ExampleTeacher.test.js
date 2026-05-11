@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import ExampleTeacher from "../components/ExampleTeacher";
 import * as api from "../services/api";
 
-jest.mock("../services/api");
+vi.mock("../services/api");
 
 beforeEach(() => {
   api.addFieldExample.mockReset();
@@ -36,7 +36,7 @@ const baseExtraction = {
 test("defaults the selection to the first unmatched field", async () => {
   const user = userEvent.setup();
   api.addFieldExample.mockResolvedValue({ id: "x", field: "customer_name", examples: ["ACME"] });
-  const onSaved = jest.fn();
+  const onSaved = vi.fn();
 
   render(
     <ExampleTeacher
@@ -76,7 +76,7 @@ test("renders array sub-fields with dotted paths", () => {
 test("surfaces a save error inline without closing", async () => {
   const user = userEvent.setup();
   api.addFieldExample.mockRejectedValue(new Error("Example 'ACME' already exists"));
-  const onSaved = jest.fn();
+  const onSaved = vi.fn();
 
   render(
     <ExampleTeacher

@@ -123,8 +123,8 @@ export default function DefinitionHistory({
 
   const handleRestore = useCallback(async () => {
     if (!archived || !definitionId) return;
-    // eslint-disable-next-line no-alert
     if (
+      // eslint-disable-next-line no-alert
       !window.confirm(
         "Restore this version? The current definition will be archived as a new version.",
       )

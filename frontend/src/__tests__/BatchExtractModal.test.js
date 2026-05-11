@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import BatchExtractModal from "../components/BatchExtractModal";
 import * as api from "../services/api";
 
-jest.mock("../services/api");
+vi.mock("../services/api");
 
 beforeEach(() => {
   api.startBatchExtract.mockReset();
