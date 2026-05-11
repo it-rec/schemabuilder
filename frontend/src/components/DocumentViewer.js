@@ -130,7 +130,11 @@ export default function DocumentViewer({
 
   if (loading) {
     return (
-      <div className="document-viewer document-viewer--loading">
+      <div
+        className="document-viewer document-viewer--loading"
+        role="status"
+        aria-live="polite"
+      >
         <Loading description="Loading document..." withOverlay={false} />
       </div>
     );
@@ -139,14 +143,23 @@ export default function DocumentViewer({
   if (!docId || !documentData) {
     return (
       <div className="document-viewer document-viewer--empty">
-        <p>Select a document to view.</p>
+        <p className="document-viewer__empty-text">
+          Select a document to view.
+        </p>
       </div>
     );
   }
 
+  const filename = documentData?.filename || "document";
+  const pageLabel = `Page ${currentPage} of ${numPages}`;
+
   return (
     <div className="document-viewer">
-      <div className="document-viewer__toolbar">
+      <div
+        className="document-viewer__toolbar"
+        role="toolbar"
+        aria-label="Document page navigation"
+      >
         <IconButton
           label="Previous page"
           kind="ghost"
@@ -156,8 +169,12 @@ export default function DocumentViewer({
         >
           <ChevronLeft />
         </IconButton>
-        <span className="document-viewer__page-info">
-          Page {currentPage} of {numPages}
+        <span
+          className="document-viewer__page-info"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {pageLabel}
         </span>
         <IconButton
           label="Next page"
@@ -173,7 +190,7 @@ export default function DocumentViewer({
         <div className="document-viewer__image-wrapper">
           <img
             src={pageImageUrl}
-            alt={`Page ${currentPage}`}
+            alt={`${filename} — page ${currentPage} of ${numPages}`}
             onLoad={handleImageLoad}
             onError={handleImageError}
             className="document-viewer__image"
@@ -186,6 +203,7 @@ export default function DocumentViewer({
             <div
               className="document-viewer__highlight"
               data-testid="highlight-overlay"
+              role="presentation"
               style={highlightStyle}
             />
           )}

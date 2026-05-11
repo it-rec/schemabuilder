@@ -11,36 +11,68 @@ import {
 
 const ConfidenceIndicator = React.memo(function ConfidenceIndicator({ confidence }) {
   if (confidence >= 0.8) {
+    const label = `High confidence: ${Math.round(confidence * 100)}%`;
     return (
-      <Tooltip label={`Confidence: ${Math.round(confidence * 100)}%`} align="left">
-        <CheckmarkFilled size={16} className="fields-panel__confidence--high" />
+      <Tooltip label={label} align="left">
+        <button
+          type="button"
+          className="fields-panel__confidence-trigger"
+          aria-label={label}
+        >
+          <CheckmarkFilled
+            size={16}
+            className="fields-panel__confidence--high"
+            aria-hidden="true"
+          />
+        </button>
       </Tooltip>
     );
   }
   if (confidence >= 0.5) {
+    const label = `Medium confidence: ${Math.round(confidence * 100)}%`;
     return (
-      <Tooltip label={`Confidence: ${Math.round(confidence * 100)}%`} align="left">
-        <WarningFilled size={16} className="fields-panel__confidence--medium" />
+      <Tooltip label={label} align="left">
+        <button
+          type="button"
+          className="fields-panel__confidence-trigger"
+          aria-label={label}
+        >
+          <WarningFilled
+            size={16}
+            className="fields-panel__confidence--medium"
+            aria-hidden="true"
+          />
+        </button>
       </Tooltip>
     );
   }
   return (
     <Tooltip label="Not found" align="left">
-      <UndefinedFilled size={16} className="fields-panel__confidence--low" />
+      <button
+        type="button"
+        className="fields-panel__confidence-trigger"
+        aria-label="Not found"
+      >
+        <UndefinedFilled
+          size={16}
+          className="fields-panel__confidence--low"
+          aria-hidden="true"
+        />
+      </button>
     </Tooltip>
   );
 });
 
 const SubFieldRow = React.memo(function SubFieldRow({
-  field,
   parentName,
   index,
   subField,
   onHoverField,
 }) {
+  const isMatched = subField.matched_entry_id != null;
   const handleEnter = useCallback(() => {
-    if (subField.matched_entry_id != null) onHoverField(subField);
-  }, [subField, onHoverField]);
+    if (isMatched) onHoverField(subField);
+  }, [isMatched, subField, onHoverField]);
   const handleLeave = useCallback(() => onHoverField(null), [onHoverField]);
 
   return (
@@ -48,6 +80,8 @@ const SubFieldRow = React.memo(function SubFieldRow({
       className="fields-panel__sub-field"
       onMouseEnter={handleEnter}
       onMouseLeave={handleLeave}
+      onFocus={handleEnter}
+      onBlur={handleLeave}
       data-testid={`field-${parentName}-${index}-${subField.name}`}
     >
       <div className="fields-panel__sub-field-row">
@@ -74,20 +108,19 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
   const isArray = field.type === "array";
   const hasValue = field.extracted_value != null;
   const hasItems = isArray && field.items && field.items.length > 0;
+  const isMatched = field.matched_entry_id != null;
 
   const fieldLabel = useMemo(() => field.name.replace(/_/g, " "), [field.name]);
 
   const handleEnter = useCallback(() => {
-    if (field.matched_entry_id != null) onHoverField(field);
-  }, [field, onHoverField]);
+    if (isMatched) onHoverField(field);
+  }, [isMatched, field, onHoverField]);
   const handleLeave = useCallback(() => onHoverField(null), [onHoverField]);
   const handleClick = useCallback(() => {
     if (isArray) setExpanded((e) => !e);
   }, [isArray]);
   // Mirror the click handler so keyboard users (Tab to focus, Space/Enter to
-  // toggle) can expand array fields. Non-array headers ignore the keypress;
-  // they're focusable so screen-reader users still get the hover-highlight
-  // affordance via focus, but pressing keys is a no-op.
+  // toggle) can expand array fields.
   const handleKeyDown = useCallback(
     (e) => {
       if (!isArray) return;
@@ -99,25 +132,28 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
     [isArray]
   );
 
+  // Array headers are toggle buttons; non-array headers rely on the inner
+  // confidence-indicator button as the keyboard focus target — its focus events
+  // bubble to the parent's onFocus/onBlur, which drives the highlight overlay.
+  const interactiveProps = isArray
+    ? {
+        onClick: handleClick,
+        onKeyDown: handleKeyDown,
+        role: "button",
+        tabIndex: 0,
+        "aria-expanded": expanded,
+      }
+    : {};
+
   return (
     <li className="fields-panel__field">
       <div
         className={`fields-panel__field-header ${hasValue || hasItems ? "fields-panel__field-header--matched" : ""}`}
         onMouseEnter={handleEnter}
         onMouseLeave={handleLeave}
-        // Array headers are interactive (click/keyboard to expand) so they
-        // get button semantics + focus. Non-array headers are visual only:
-        // hover-highlight uses mouse events; keyboard users get the same
-        // affordance by tabbing into the field-value, not into the header.
-        {...(isArray
-          ? {
-              onClick: handleClick,
-              onKeyDown: handleKeyDown,
-              role: "button",
-              tabIndex: 0,
-              "aria-expanded": expanded,
-            }
-          : {})}
+        onFocus={handleEnter}
+        onBlur={handleLeave}
+        {...interactiveProps}
         data-testid={`field-${field.name}`}
       >
         <div className="fields-panel__field-label-row">
@@ -154,7 +190,7 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
 
         {field.examples && field.examples.length > 0 && !hasValue && (
           <div className="fields-panel__field-examples">
-            <Information size={12} />
+            <Information size={12} aria-hidden="true" />
             <span>e.g. {field.examples.join(", ")}</span>
           </div>
         )}
@@ -212,9 +248,11 @@ export default function FieldsPanel({
 
   if (loading) {
     return (
-      <div className="fields-panel">
-        <h4 className="fields-panel__title">Document Fields</h4>
-        <p className="fields-panel__empty">Extracting fields...</p>
+      <div className="fields-panel" aria-busy="true">
+        <h2 className="fields-panel__title">Document Fields</h2>
+        <p className="fields-panel__empty" role="status" aria-live="polite">
+          Extracting fields...
+        </p>
       </div>
     );
   }
@@ -222,7 +260,7 @@ export default function FieldsPanel({
   if (!extraction) {
     return (
       <div className="fields-panel">
-        <h4 className="fields-panel__title">Document Fields</h4>
+        <h2 className="fields-panel__title">Document Fields</h2>
         <p className="fields-panel__empty">
           Select a document definition to extract fields.
         </p>
@@ -233,9 +271,9 @@ export default function FieldsPanel({
   return (
     <div className="fields-panel">
       <div className="fields-panel__header">
-        <h4 className="fields-panel__title">
+        <h2 className="fields-panel__title">
           {extraction.document_type}
-        </h4>
+        </h2>
         <Tag size="sm" type={matchedCount > 0 ? "green" : "gray"}>
           {matchedCount}/{fields.length} found
         </Tag>
@@ -251,7 +289,11 @@ export default function FieldsPanel({
           role="alert"
           data-testid="extraction-error"
         >
-          <WarningFilled size={16} />
+          <WarningFilled
+            size={16}
+            className="fields-panel__error-icon"
+            aria-hidden="true"
+          />
           <span>
             Text extraction failed: {extraction.extraction_error}. Matches below
             are based on no extracted text.
