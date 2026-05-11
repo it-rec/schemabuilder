@@ -5,10 +5,13 @@ import {
   HeaderName,
   Content,
   Dropdown,
+  Button,
 } from "@carbon/react";
+import { Add, Edit } from "@carbon/react/icons";
 import DocumentList from "./components/DocumentList";
 import DocumentViewer from "./components/DocumentViewer";
 import FieldsPanel from "./components/FieldsPanel";
+import DefinitionEditor from "./components/DefinitionEditor";
 import {
   fetchDocuments,
   fetchDocument,
@@ -32,6 +35,11 @@ export default function App() {
 
   // Highlighted field (for document overlay)
   const [highlightedField, setHighlightedField] = useState(null);
+
+  // Definition editor modal — `editorMode` is null when closed, else "create" or
+  // "edit". Tracking the mode separately from `open` keeps the modal's body
+  // logic (hydrate-on-open) simple and lets the dialog tear down cleanly.
+  const [editorMode, setEditorMode] = useState(null);
 
   // Load document list and definitions on mount. AbortController cancels
   // in-flight fetches if the component unmounts (HMR / route change), avoiding
@@ -145,6 +153,45 @@ export default function App() {
     setSelectedDefId(selectedItem?.id || null);
   }, []);
 
+  // Re-fetch the definitions list after a save/delete so newly created classes
+  // appear in the dropdown immediately, and a renamed document_type is
+  // reflected without a page reload.
+  const refreshDefinitions = useCallback(async () => {
+    try {
+      const defs = await fetchDefinitions();
+      setDefinitions(defs);
+      return defs;
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+  }, []);
+
+  const handleEditorSaved = useCallback(
+    async (saved) => {
+      const defs = await refreshDefinitions();
+      if (saved?.id && defs?.some((d) => d.id === saved.id)) {
+        setSelectedDefId(saved.id);
+      }
+      setEditorMode(null);
+    },
+    [refreshDefinitions],
+  );
+
+  const handleEditorDeleted = useCallback(
+    async (deletedId) => {
+      const defs = await refreshDefinitions();
+      if (selectedDefId === deletedId) {
+        // Fall back to the first remaining definition (or none) so the
+        // extraction panel doesn't keep showing stale fields from a class
+        // that no longer exists.
+        setSelectedDefId(defs && defs.length > 0 ? defs[0].id : null);
+      }
+      setEditorMode(null);
+    },
+    [refreshDefinitions, selectedDefId],
+  );
+
   // Bboxes returned by extraction are in Docling's coordinate space, which can
   // differ from the pypdfium2 dims used for the rendered image. Prefer Docling's
   // page_dimensions for highlight math when available.
@@ -186,6 +233,27 @@ export default function App() {
                 onChange={handleDefChange}
                 size="sm"
               />
+              <div className="definition-selector__actions">
+                <Button
+                  kind="ghost"
+                  size="sm"
+                  renderIcon={Add}
+                  onClick={() => setEditorMode("create")}
+                  data-testid="def-new-button"
+                >
+                  New
+                </Button>
+                <Button
+                  kind="ghost"
+                  size="sm"
+                  renderIcon={Edit}
+                  onClick={() => setEditorMode("edit")}
+                  disabled={!selectedDefId}
+                  data-testid="def-edit-button"
+                >
+                  Edit
+                </Button>
+              </div>
             </div>
             <DocumentList
               documents={documents}
@@ -218,6 +286,16 @@ export default function App() {
           </aside>
         </div>
       </Content>
+      {editorMode != null && (
+        <DefinitionEditor
+          open
+          mode={editorMode}
+          definitionId={editorMode === "edit" ? selectedDefId : null}
+          onClose={() => setEditorMode(null)}
+          onSaved={handleEditorSaved}
+          onDeleted={handleEditorDeleted}
+        />
+      )}
     </Theme>
   );
 }

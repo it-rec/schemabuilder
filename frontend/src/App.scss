@@ -87,6 +87,101 @@
   border-bottom: 1px solid var(--cds-border-subtle, #e0e0e0);
 }
 
+.definition-selector__actions {
+  display: flex;
+  gap: spacing.$spacing-02;
+  margin-top: spacing.$spacing-03;
+}
+
+// DefinitionEditor (modal) styles. The component renders inside Carbon's
+// ComposedModal so it inherits modal chrome; these rules apply only to the
+// body content.
+.definition-editor__body {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-05;
+}
+
+.definition-editor__fields-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: spacing.$spacing-04;
+  padding-top: spacing.$spacing-04;
+  border-top: 1px solid var(--cds-border-subtle, #e0e0e0);
+}
+
+.definition-editor__section-title {
+  @include type.type-style("heading-compact-02");
+  margin: 0;
+  color: var(--cds-text-primary, #161616);
+}
+
+.definition-editor__empty {
+  @include type.type-style("body-compact-01");
+  color: var(--cds-text-secondary, #525252);
+  margin: 0;
+  padding: spacing.$spacing-04;
+  background: var(--cds-layer-01, #f4f4f4);
+  text-align: center;
+}
+
+.definition-editor__field {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-04;
+  margin: 0;
+  padding: spacing.$spacing-05;
+  border: 1px solid var(--cds-border-subtle, #e0e0e0);
+  background: var(--cds-layer-01, #f4f4f4);
+}
+
+.definition-editor__field--depth-1 {
+  background: var(--cds-layer-02, #ffffff);
+  margin-left: spacing.$spacing-04;
+}
+
+.definition-editor__field-legend {
+  @include type.type-style("label-01");
+  color: var(--cds-text-secondary, #525252);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 spacing.$spacing-02;
+}
+
+.definition-editor__field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: spacing.$spacing-04;
+  align-items: end;
+}
+
+.definition-editor__subfields {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-03;
+}
+
+.definition-editor__subfields-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  @include type.type-style("label-02");
+  color: var(--cds-text-secondary, #525252);
+}
+
+.definition-editor__chip-input {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-02;
+}
+
+.definition-editor__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: spacing.$spacing-02;
+}
+
 // DocumentList styles
 .document-list {
   padding: spacing.$spacing-05;
