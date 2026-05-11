@@ -68,4 +68,11 @@ if __name__ == "__main__":
                     pool.shutdown(wait=False, cancel_futures=True)
                 except Exception:
                     pass
+        # os._exit skips stdio flushing, so on Python 3.14 the schema written
+        # via sys.stdout.write never reaches the parent process and the
+        # OpenAPI-drift test reads an empty subprocess stdout. Flush before
+        # the hard exit. (3.11/CI happened to flush anyway under the old
+        # implementation; explicit is safer than relying on that.)
+        sys.stdout.flush()
+        sys.stderr.flush()
         os._exit(0)
