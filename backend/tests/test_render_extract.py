@@ -20,7 +20,6 @@ import pytest
 
 import main
 
-
 # ── pypdfium2 fakes ─────────────────────────────────────────────────────
 
 
@@ -277,8 +276,10 @@ def test_render_page_returns_none_when_renderer_returns_none(monkeypatch, tmp_pa
 
 
 class _Bbox:
-    def __init__(self, l=0.0, t=0.0, r=10.0, b=10.0, origin="BOTTOMLEFT"):
-        self.l, self.t, self.r, self.b = l, t, r, b
+    # noqa: E741 — `l` matches the attribute name read by main._extract_text.
+    def __init__(self, left=0.0, t=0.0, r=10.0, b=10.0, origin="BOTTOMLEFT"):
+        self.l = left  # noqa: E741
+        self.t, self.r, self.b = t, r, b
         self.coord_origin = types.SimpleNamespace(value=origin)
 
 
@@ -342,7 +343,7 @@ class _FakeConverter:
 
 
 def test_extract_text_returns_entries_and_dims(monkeypatch, tmp_path):
-    bbox = _Bbox(l=10.0, t=20.0, r=30.0, b=40.0, origin="BOTTOMLEFT")
+    bbox = _Bbox(left=10.0, t=20.0, r=30.0, b=40.0, origin="BOTTOMLEFT")
     doc = _FakeDoclingDoc(
         items=[
             _TextItem("Hello", page=1, bbox=bbox),
@@ -627,7 +628,7 @@ def test_build_text_converter_wires_pipeline_options(monkeypatch):
     monkeypatch.setenv("DOCLING_NUM_THREADS", "3")
     monkeypatch.delenv("DOCLING_DEVICE", raising=False)
 
-    converter = main._build_text_converter(do_ocr=True)
+    main._build_text_converter(do_ocr=True)
     pdf_opt = captured["format_options"]["pdf"]
     pipe = pdf_opt.pipeline_options
     assert pipe.do_ocr is True
@@ -855,8 +856,10 @@ def test_convert_to_pdf_distinct_stems_per_extension(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_pdf_temp_dir", str(tmp_path))
     log = []
     _install_fake_win32(monkeypatch, log)
-    docx = tmp_path / "report.docx"; docx.write_bytes(b"D")
-    pptx = tmp_path / "report.pptx"; pptx.write_bytes(b"P")
+    docx = tmp_path / "report.docx"
+    docx.write_bytes(b"D")
+    pptx = tmp_path / "report.pptx"
+    pptx.write_bytes(b"P")
     a = main._convert_to_pdf(docx)
     b = main._convert_to_pdf(pptx)
     assert a != b
@@ -1038,8 +1041,10 @@ def test_build_documents_listing_skips_files_that_stat_fails(monkeypatch, tmp_pa
     """If stat() raises on a file (e.g. permission denied), that file is
     skipped instead of crashing the whole listing."""
     monkeypatch.setattr(main, "TEST_DOCS_DIR", tmp_path)
-    good = tmp_path / "good.pdf"; good.write_bytes(b"PDF")
-    bad = tmp_path / "bad.pdf"; bad.write_bytes(b"PDF")
+    good = tmp_path / "good.pdf"
+    good.write_bytes(b"PDF")
+    bad = tmp_path / "bad.pdf"
+    bad.write_bytes(b"PDF")
 
     real_stat = Path.stat
 
@@ -1072,8 +1077,10 @@ def test_docs_dir_signature_returns_empty_on_iterdir_oserror(monkeypatch, tmp_pa
 
 def test_docs_dir_signature_skips_files_that_stat_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "TEST_DOCS_DIR", tmp_path)
-    good = tmp_path / "g.pdf"; good.write_bytes(b"PDF")
-    bad = tmp_path / "b.pdf"; bad.write_bytes(b"PDF")
+    good = tmp_path / "g.pdf"
+    good.write_bytes(b"PDF")
+    bad = tmp_path / "b.pdf"
+    bad.write_bytes(b"PDF")
 
     real_stat = Path.stat
 
@@ -1095,8 +1102,10 @@ def test_docs_dir_signature_skips_files_that_stat_fails(monkeypatch, tmp_path):
 
 def test_definitions_dir_signature_skips_files_that_stat_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "DEFINITIONS_DIR", tmp_path)
-    good = tmp_path / "good.json"; good.write_text("{}")
-    bad = tmp_path / "bad.json"; bad.write_text("{}")
+    good = tmp_path / "good.json"
+    good.write_text("{}")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
 
     real_stat = Path.stat
 

@@ -8,10 +8,8 @@ the document listing cache key, and the OCR/extract counters.
 """
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient

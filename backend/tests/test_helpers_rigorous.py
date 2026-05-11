@@ -8,7 +8,6 @@ should catch it.
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import re
@@ -20,7 +19,6 @@ from pathlib import Path
 import pytest
 
 import main
-
 
 # ── _file_signature ──────────────────────────────────────────────────────
 
@@ -1201,8 +1199,10 @@ def test_resolve_ocr_decision_metric_increments(monkeypatch, tmp_path):
     with main._metrics_lock:
         main._metrics["ocr_decisions_on"] = 0
         main._metrics["ocr_decisions_off"] = 0
-    f1 = tmp_path / "on.pdf"; f1.write_bytes(b"x")
-    f2 = tmp_path / "off.pdf"; f2.write_bytes(b"y")
+    f1 = tmp_path / "on.pdf"
+    f1.write_bytes(b"x")
+    f2 = tmp_path / "off.pdf"
+    f2.write_bytes(b"y")
     monkeypatch.setattr(main, "_document_needs_ocr", lambda p: p.name == "on.pdf")
     main._resolve_ocr_decision(f1)
     main._resolve_ocr_decision(f2)
@@ -1272,14 +1272,16 @@ def test_document_needs_ocr_empty_pdf_returns_false(monkeypatch, tmp_path):
 def test_document_needs_ocr_fast_exit_on_first_page(monkeypatch, tmp_path):
     """A single page with >100 chars triggers the fast exit (no OCR needed)."""
     _install_fake_pdfium(monkeypatch, _FakePdfDoc(["x" * 500]))
-    f = tmp_path / "big.pdf"; f.write_bytes(b"PDF")
+    f = tmp_path / "big.pdf"
+    f.write_bytes(b"PDF")
     assert main._document_needs_ocr(f) is False
 
 
 def test_document_needs_ocr_image_only_pdf_returns_true(monkeypatch, tmp_path):
     """3 pages each producing 0 chars → image-only → needs OCR."""
     _install_fake_pdfium(monkeypatch, _FakePdfDoc(["", "", ""]))
-    f = tmp_path / "scan.pdf"; f.write_bytes(b"PDF")
+    f = tmp_path / "scan.pdf"
+    f.write_bytes(b"PDF")
     assert main._document_needs_ocr(f) is True
 
 
@@ -1288,7 +1290,8 @@ def test_document_needs_ocr_samples_first_middle_last(monkeypatch, tmp_path):
     have content, we shouldn't OCR even if other pages are empty."""
     pages = ["", ""] * 5 + ["lots of text here that is longer than thirty chars"]
     _install_fake_pdfium(monkeypatch, _FakePdfDoc(pages))
-    f = tmp_path / "long.pdf"; f.write_bytes(b"PDF")
+    f = tmp_path / "long.pdf"
+    f.write_bytes(b"PDF")
     # Last page has 50+ chars >= fast_exit; sample includes last page.
     assert main._document_needs_ocr(f) is False
 
@@ -1303,7 +1306,8 @@ def test_document_needs_ocr_open_failure_short_circuits(monkeypatch, tmp_path):
 
     fake = types.SimpleNamespace(PdfDocument=fail_open)
     monkeypatch.setitem(sys.modules, "pypdfium2", fake)
-    f = tmp_path / "bad.pdf"; f.write_bytes(b"PDF")
+    f = tmp_path / "bad.pdf"
+    f.write_bytes(b"PDF")
     assert main._document_needs_ocr(f) is False
 
 
@@ -1326,7 +1330,8 @@ def test_document_needs_ocr_per_page_textpage_exception(monkeypatch, tmp_path):
             pass
 
     _install_fake_pdfium(monkeypatch, _Doc())
-    f = tmp_path / "torn.pdf"; f.write_bytes(b"PDF")
+    f = tmp_path / "torn.pdf"
+    f.write_bytes(b"PDF")
     # All pages broken → 0 chars total → needs OCR.
     assert main._document_needs_ocr(f) is True
 

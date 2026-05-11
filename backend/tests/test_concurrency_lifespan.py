@@ -14,14 +14,11 @@ import asyncio
 import sys
 import threading
 import time
-import types
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 import main
-
 
 # ── _cleanup_pdf_temp_dir error swallowing ──────────────────────────────
 
@@ -46,7 +43,9 @@ def test_cleanup_pdf_temp_dir_swallows_unexpected_exception(monkeypatch, tmp_pat
 def test_extract_text_coord_origin_str_fallback(monkeypatch, tmp_path):
     """If coord_origin has neither .value nor .name, fall back to str(co)."""
     from tests.test_render_extract import (
-        _FakeDocPage, _FakeDoclingDoc, _FakeConverter, _TextItem,
+        _FakeConverter,
+        _FakeDoclingDoc,
+        _TextItem,
     )
 
     class _OriginPlain:
