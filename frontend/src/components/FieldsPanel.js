@@ -1,5 +1,10 @@
 import React, { useState, useMemo, useCallback } from "react";
-import { Tag, Tooltip } from "@carbon/react";
+import {
+  OverflowMenu,
+  OverflowMenuItem,
+  Tag,
+  Tooltip,
+} from "@carbon/react";
 import {
   CheckmarkFilled,
   WarningFilled,
@@ -68,6 +73,7 @@ const SubFieldRow = React.memo(function SubFieldRow({
   index,
   subField,
   onHoverField,
+  highlighted,
 }) {
   const isMatched = subField.matched_entry_id != null;
   const handleEnter = useCallback(() => {
@@ -77,7 +83,10 @@ const SubFieldRow = React.memo(function SubFieldRow({
 
   return (
     <li
-      className="fields-panel__sub-field"
+      className={
+        "fields-panel__sub-field" +
+        (highlighted ? " fields-panel__sub-field--highlighted" : "")
+      }
       onMouseEnter={handleEnter}
       onMouseLeave={handleLeave}
       onFocus={handleEnter}
@@ -103,7 +112,11 @@ const SubFieldRow = React.memo(function SubFieldRow({
   );
 });
 
-const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
+const FieldItem = React.memo(function FieldItem({
+  field,
+  onHoverField,
+  highlightedEntryId,
+}) {
   const [expanded, setExpanded] = useState(false);
   const isArray = field.type === "array";
   const hasValue = field.extracted_value != null;
@@ -145,10 +158,24 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
       }
     : {};
 
+  const isSelfHighlighted =
+    highlightedEntryId != null && field.matched_entry_id === highlightedEntryId;
+  const hasHighlightedChild =
+    isArray &&
+    highlightedEntryId != null &&
+    field.items?.some((item) =>
+      item.fields?.some((sf) => sf.matched_entry_id === highlightedEntryId),
+    );
+  const isHighlighted = isSelfHighlighted || hasHighlightedChild;
+
   return (
     <li className="fields-panel__field">
       <div
-        className={`fields-panel__field-header ${hasValue || hasItems ? "fields-panel__field-header--matched" : ""}`}
+        className={
+          "fields-panel__field-header" +
+          (hasValue || hasItems ? " fields-panel__field-header--matched" : "") +
+          (isHighlighted ? " fields-panel__field-header--highlighted" : "")
+        }
         onMouseEnter={handleEnter}
         onMouseLeave={handleLeave}
         onFocus={handleEnter}
@@ -164,6 +191,36 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
           )}
           <span className="fields-panel__field-name">{fieldLabel}</span>
           {!isArray && <ConfidenceIndicator confidence={field.confidence || 0} />}
+          {!isArray && typeof field.min_confidence === "number" && (
+            <Tag
+              size="sm"
+              type="gray"
+              title="Per-field confidence threshold"
+              data-testid={`field-threshold-${field.name}`}
+            >
+              ≥{Math.round(field.min_confidence * 100)}%
+            </Tag>
+          )}
+          {!isArray && typeof field.pattern === "string" && field.pattern && (
+            <Tag
+              size="sm"
+              type="purple"
+              title={`Regex pattern: ${field.pattern}`}
+              data-testid={`field-pattern-${field.name}`}
+            >
+              regex
+            </Tag>
+          )}
+          {!isArray && field.match_reason === "llm_fallback" && (
+            <Tag
+              size="sm"
+              type="magenta"
+              title="This value came from the LLM fallback, not the rule-based matcher."
+              data-testid={`field-llm-${field.name}`}
+            >
+              LLM
+            </Tag>
+          )}
           {isArray && hasItems && (
             <Tag size="sm" type="blue">
               {field.items.length} item{field.items.length !== 1 ? "s" : ""}
@@ -185,6 +242,28 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
         {!isArray && !hasValue && (
           <div className="fields-panel__field-value fields-panel__field-value--empty">
             <span className="fields-panel__field-value-text">Not found</span>
+          </div>
+        )}
+
+        {!isArray && !hasValue && field.rejected_candidate && (
+          <div
+            className="fields-panel__rejected"
+            data-testid={`rejected-${field.name}`}
+            role="note"
+          >
+            <WarningFilled
+              size={12}
+              className="fields-panel__rejected-icon"
+              aria-hidden="true"
+            />
+            <span className="fields-panel__rejected-text">
+              Below threshold:{" "}
+              <strong>&ldquo;{field.rejected_candidate.text}&rdquo;</strong>{" "}
+              ({Math.round(field.rejected_candidate.confidence * 100)}%)
+              {field.rejected_candidate.page
+                ? ` — p.${field.rejected_candidate.page}`
+                : ""}
+            </span>
           </div>
         )}
 
@@ -212,6 +291,10 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
                       index={idx}
                       subField={subField}
                       onHoverField={onHoverField}
+                      highlighted={
+                        highlightedEntryId != null &&
+                        subField.matched_entry_id === highlightedEntryId
+                      }
                     />
                   ))}
                 </ul>
@@ -229,9 +312,16 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
 export default function FieldsPanel({
   extraction,
   onHoverField,
+  onExport,
+  highlightedField,
   loading,
 }) {
   const fields = extraction?.fields;
+  const highlightedEntryId = highlightedField?.matched_entry_id ?? null;
+  const tableNames = useMemo(
+    () => (Array.isArray(extraction?.target_tables) ? extraction.target_tables : []),
+    [extraction],
+  );
 
   const matchedCount = useMemo(() => {
     if (!fields) return 0;
@@ -274,9 +364,31 @@ export default function FieldsPanel({
         <h2 className="fields-panel__title">
           {extraction.document_type}
         </h2>
-        <Tag size="sm" type={matchedCount > 0 ? "green" : "gray"}>
-          {matchedCount}/{fields.length} found
-        </Tag>
+        <div className="fields-panel__header-actions">
+          <Tag size="sm" type={matchedCount > 0 ? "green" : "gray"}>
+            {matchedCount}/{fields.length} found
+          </Tag>
+          {onExport && tableNames.length > 0 && (
+            <OverflowMenu
+              size="sm"
+              flipped
+              iconDescription="Export options"
+              data-testid="export-menu"
+            >
+              <OverflowMenuItem
+                itemText="Download all tables (JSON)"
+                onClick={() => onExport({ format: "json" })}
+              />
+              {tableNames.map((t) => (
+                <OverflowMenuItem
+                  key={t}
+                  itemText={`Download "${t}" (CSV)`}
+                  onClick={() => onExport({ format: "csv", table: t })}
+                />
+              ))}
+            </OverflowMenu>
+          )}
+        </div>
       </div>
       {extraction.document_description && (
         <p className="fields-panel__description">
@@ -306,6 +418,7 @@ export default function FieldsPanel({
             key={field.name}
             field={field}
             onHoverField={onHoverField}
+            highlightedEntryId={highlightedEntryId}
           />
         ))}
       </ul>

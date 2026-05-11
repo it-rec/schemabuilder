@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "../App";
 import * as api from "../services/api";
 
@@ -83,4 +83,66 @@ test("loads definitions and triggers extraction", async () => {
 test("displays definition selector", async () => {
   render(<App />);
   expect(await screen.findByText("Document class")).toBeInTheDocument();
+});
+
+test("j / k navigate to the next / previous document", async () => {
+  render(<App />);
+  // Wait for the docs to load — the first doc is auto-selected.
+  await screen.findByText("sample.pdf");
+
+  // j → next document (sample.docx)
+  fireEvent.keyDown(window, { key: "j" });
+  await waitFor(() =>
+    expect(api.fetchDocument).toHaveBeenCalledWith("def456", expect.any(Object)),
+  );
+
+  // k → back to the first
+  fireEvent.keyDown(window, { key: "k" });
+  await waitFor(() => {
+    const calls = api.fetchDocument.mock.calls.map((c) => c[0]);
+    expect(calls).toContain("abc123");
+  });
+});
+
+test("keyboard nav is suppressed when typing in an input", async () => {
+  render(<App />);
+  await screen.findByText("sample.pdf");
+  api.fetchDocument.mockClear();
+
+  const search = screen.getByPlaceholderText(/Search documents/i);
+  search.focus();
+  fireEvent.keyDown(search, { key: "j" });
+  // No additional fetchDocument call because the keydown was on an INPUT.
+  expect(api.fetchDocument).not.toHaveBeenCalled();
+});
+
+test("theme toggle flips data attribute / updates label", async () => {
+  render(<App />);
+  const toggle = await screen.findByTestId("theme-toggle");
+  expect(toggle).toHaveAttribute("aria-label", expect.stringMatching(/dark mode/i));
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-label", expect.stringMatching(/light mode/i));
+});
+
+test("export menu triggers JSON download via api.exportTablesJson", async () => {
+  api.extractFields.mockResolvedValue({
+    ...mockExtraction,
+    target_tables: ["Invoice"],
+  });
+  api.exportTablesJson = jest.fn().mockResolvedValue({
+    document_id: "abc123",
+    definition_id: "invoice",
+    tables: { Invoice: [{ doc_id: "abc123", invoice_id: "INV-001" }] },
+  });
+
+  render(<App />);
+  // Wait until extraction has resolved and the export menu trigger has
+  // mounted in the panel.
+  const trigger = await screen.findByRole("button", { name: /Export options/i });
+  fireEvent.click(trigger);
+  fireEvent.click(await screen.findByText(/Download all tables \(JSON\)/i));
+
+  await waitFor(() =>
+    expect(api.exportTablesJson).toHaveBeenCalledWith("abc123", "invoice"),
+  );
 });

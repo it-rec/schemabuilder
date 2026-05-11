@@ -19,6 +19,10 @@
   padding-top: 3rem; // Account for Carbon header
   height: 100vh;
   box-sizing: border-box;
+  // Theme tokens flip with g10 ↔ g90, but the outer <body> stays at the
+  // browser default. Force the app's surface to honor the active theme.
+  background: var(--cds-background, #ffffff);
+  color: var(--cds-text-primary, #161616);
 }
 
 .app-layout {
@@ -87,6 +91,223 @@
   border-bottom: 1px solid var(--cds-border-subtle, #e0e0e0);
 }
 
+.definition-selector__actions {
+  display: flex;
+  gap: spacing.$spacing-02;
+  margin-top: spacing.$spacing-03;
+}
+
+// DefinitionEditor (modal) styles. The component renders inside Carbon's
+// ComposedModal so it inherits modal chrome; these rules apply only to the
+// body content.
+.definition-editor__body {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-05;
+}
+
+.definition-editor__fields-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: spacing.$spacing-04;
+  padding-top: spacing.$spacing-04;
+  border-top: 1px solid var(--cds-border-subtle, #e0e0e0);
+}
+
+.definition-editor__section-title {
+  @include type.type-style("heading-compact-02");
+  margin: 0;
+  color: var(--cds-text-primary, #161616);
+}
+
+.definition-editor__empty {
+  @include type.type-style("body-compact-01");
+  color: var(--cds-text-secondary, #525252);
+  margin: 0;
+  padding: spacing.$spacing-04;
+  background: var(--cds-layer-01, #f4f4f4);
+  text-align: center;
+}
+
+.definition-editor__field {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-04;
+  margin: 0;
+  padding: spacing.$spacing-05;
+  border: 1px solid var(--cds-border-subtle, #e0e0e0);
+  background: var(--cds-layer-01, #f4f4f4);
+}
+
+.definition-editor__field--depth-1 {
+  background: var(--cds-layer-02, #ffffff);
+  margin-left: spacing.$spacing-04;
+}
+
+.definition-editor__field-legend {
+  @include type.type-style("label-01");
+  color: var(--cds-text-secondary, #525252);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 spacing.$spacing-02;
+}
+
+.definition-editor__field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: spacing.$spacing-04;
+  align-items: end;
+}
+
+.definition-editor__subfields {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-03;
+}
+
+.definition-editor__subfields-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  @include type.type-style("label-02");
+  color: var(--cds-text-secondary, #525252);
+}
+
+.definition-editor__chip-input {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-02;
+}
+
+.definition-editor__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: spacing.$spacing-02;
+}
+
+// ExampleTeacher (modal) styles. Compact list of teachable fields with
+// inline hints so the user can pick without scrolling back to the panel.
+.example-teacher__intro {
+  @include type.type-style("body-compact-01");
+  margin: 0 0 spacing.$spacing-04 0;
+  color: var(--cds-text-primary, #161616);
+}
+
+.example-teacher__value {
+  background: var(--cds-layer-01, #f4f4f4);
+  padding: 0 spacing.$spacing-02;
+  border-radius: 2px;
+  font-family: var(--cds-code-02-font-family, monospace);
+}
+
+.example-teacher__empty {
+  @include type.type-style("body-compact-01");
+  color: var(--cds-text-secondary, #525252);
+  margin: 0;
+}
+
+.example-teacher__option {
+  display: inline-flex;
+  align-items: center;
+  gap: spacing.$spacing-02;
+  flex-wrap: wrap;
+}
+
+.example-teacher__option-name {
+  text-transform: capitalize;
+}
+
+.example-teacher__option-examples {
+  @include type.type-style("label-01");
+  color: var(--cds-text-helper, #6f6f6f);
+}
+
+// BatchExtractModal styles. Plain layout — the heavy lifting (progress bar,
+// modal chrome) is Carbon.
+// DefinitionHistory modal — side-by-side: version list on the left,
+// unified-diff pane on the right.
+.definition-history__layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: spacing.$spacing-05;
+}
+
+.definition-history__list {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.definition-history__row {
+  cursor: pointer;
+}
+
+.definition-history__row--selected {
+  background: var(--cds-layer-selected-01, #e0e0e0) !important;
+  box-shadow: inset 3px 0 0 0 var(--cds-border-interactive, #0f62fe);
+}
+
+.definition-history__diff {
+  border: 1px solid var(--cds-border-subtle, #e0e0e0);
+  background: var(--cds-layer-01, #f4f4f4);
+  max-height: 60vh;
+  overflow: auto;
+  padding: spacing.$spacing-03;
+}
+
+.definition-history__diff-pre {
+  margin: 0;
+  @include type.type-style("code-01");
+  font-family: var(--cds-code-02-font-family, monospace);
+  white-space: pre;
+  line-height: 1.4;
+}
+
+.definition-history__diff-removed {
+  display: block;
+  background: var(--cds-notification-background-error, #fff1f1);
+  color: var(--cds-support-error, #da1e28);
+}
+
+.definition-history__diff-added {
+  display: block;
+  background: var(--cds-notification-background-success, #defbe6);
+  color: var(--cds-support-success, #24a148);
+}
+
+.definition-history__diff-same {
+  display: block;
+}
+
+.definition-history__empty {
+  @include type.type-style("body-compact-01");
+  color: var(--cds-text-secondary, #525252);
+  padding: spacing.$spacing-04;
+}
+
+.batch-modal__intro {
+  @include type.type-style("body-compact-01");
+  margin: 0 0 spacing.$spacing-04 0;
+  color: var(--cds-text-primary, #161616);
+}
+
+.batch-modal__errors {
+  margin-top: spacing.$spacing-04;
+  padding: spacing.$spacing-03 spacing.$spacing-04;
+  background: var(--cds-notification-background-warning, #fcf4d6);
+  border-left: 3px solid var(--cds-support-warning, #f1c21b);
+  @include type.type-style("label-01");
+
+  ul {
+    margin: spacing.$spacing-02 0 0;
+    padding-left: spacing.$spacing-05;
+  }
+
+  code {
+    font-family: var(--cds-code-02-font-family, monospace);
+  }
+}
+
 // DocumentList styles
 .document-list {
   padding: spacing.$spacing-05;
@@ -96,10 +317,25 @@
   }
 }
 
+.document-list__heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: spacing.$spacing-03;
+  margin-bottom: spacing.$spacing-04;
+}
+
 .document-list__heading {
   @include type.type-style("heading-compact-02");
   color: var(--cds-text-primary, #161616);
-  margin: 0 0 spacing.$spacing-04 0;
+  margin: 0;
+}
+
+.document-list__size-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: spacing.$spacing-02;
 }
 
 .document-list__items {
@@ -206,6 +442,12 @@
   margin-bottom: spacing.$spacing-03;
 }
 
+.fields-panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: spacing.$spacing-02;
+}
+
 .fields-panel__title {
   @include type.type-style("heading-compact-01");
   color: var(--cds-text-primary, #161616);
@@ -259,6 +501,95 @@
 
 .fields-panel__field-header--matched {
   box-shadow: inset 3px 0 0 0 var(--cds-support-success, #24a148);
+}
+
+// Reverse highlight: when the user hovers an overlay on the rendered page,
+// the corresponding field row in the panel lights up.
+.fields-panel__field-header--highlighted {
+  background: var(--cds-layer-hover-01, #e8e8e8) !important;
+  border-color: var(--cds-border-interactive, #0f62fe) !important;
+}
+
+.fields-panel__sub-field--highlighted {
+  background: var(--cds-layer-hover-01, #e8e8e8) !important;
+  border-color: var(--cds-border-interactive, #0f62fe) !important;
+}
+
+// Bounding-box overlays. Each matched field on the current page renders as a
+// low-opacity blue rectangle so users can see at-a-glance where every
+// extraction landed. The "active" variant (hovered field or hovered overlay)
+// gets a solid border and a label.
+.document-viewer__highlight {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  background: rgba(15, 98, 254, 0.08);
+  border: 1px solid rgba(15, 98, 254, 0.45);
+  border-radius: 2px;
+  cursor: pointer;
+  transition:
+    background-color motion.$duration-fast-02 motion.motion(standard, productive),
+    border-color motion.$duration-fast-02 motion.motion(standard, productive);
+
+  &:hover,
+  &:focus-visible {
+    background: rgba(15, 98, 254, 0.18);
+    border-color: #0f62fe;
+  }
+
+  &:focus-visible {
+    @include focus-ring;
+  }
+}
+
+.document-viewer__highlight--active {
+  background: rgba(15, 98, 254, 0.25);
+  border: 2px solid #0f62fe;
+}
+
+// Invisible click target overlaid on each Docling text entry. Sits below
+// the matched-field highlight overlays so unmatched text is still
+// discoverable — hover surfaces a dashed outline + pointer to invite
+// teaching.
+.document-viewer__teach-target {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 1px dashed transparent;
+  cursor: pointer;
+  z-index: 1; // below the matched-field highlight, above the image
+
+  &:hover {
+    background: rgba(36, 161, 72, 0.08);
+    border-color: rgba(36, 161, 72, 0.7);
+  }
+
+  &:focus-visible {
+    @include focus-ring;
+  }
+}
+
+// Suppress hover affordance for entries that are already matched — they
+// already have a ghost overlay and clicking would teach a duplicate. The
+// target stays mounted so screen readers can still discover the action.
+.document-viewer__teach-target--matched {
+  pointer-events: none;
+}
+
+.document-viewer__highlight-label {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 2px;
+  padding: 2px spacing.$spacing-02;
+  background: #0f62fe;
+  color: #ffffff;
+  @include type.type-style("label-01");
+  text-transform: capitalize;
+  white-space: nowrap;
+  pointer-events: none;
+  border-radius: 2px;
 }
 
 .fields-panel__field-label-row {
@@ -356,6 +687,29 @@
   @include type.type-style("label-01");
   color: var(--cds-text-secondary, #525252);
   flex-shrink: 0;
+}
+
+.fields-panel__rejected {
+  display: flex;
+  align-items: flex-start;
+  gap: spacing.$spacing-02;
+  margin-top: spacing.$spacing-02;
+  padding: spacing.$spacing-02 spacing.$spacing-03;
+  background: var(--cds-notification-background-warning, #fcf4d6);
+  border-left: 3px solid var(--cds-support-warning, #f1c21b);
+  @include type.type-style("label-01");
+  color: var(--cds-text-primary, #161616);
+}
+
+.fields-panel__rejected-icon {
+  color: var(--cds-support-warning, #f1c21b);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.fields-panel__rejected-text {
+  flex: 1;
+  min-width: 0;
 }
 
 .fields-panel__field-examples {

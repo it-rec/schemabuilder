@@ -7,6 +7,10 @@ export default function DocumentViewer({
   docId,
   documentData,
   highlightedField,
+  onHoverField,
+  onTeachEntry,
+  textEntries,
+  extractedFields,
   loading,
 }) {
   const [currentPage, setCurrentPage] = useState(1);
@@ -77,51 +81,100 @@ export default function DocumentViewer({
     [numPages],
   );
 
-  // Highlight overlay for the currently hovered field. Memoized so an unrelated
-  // state change (e.g. page hover elsewhere) doesn't recompute it.
-  const highlightStyle = useMemo(() => {
-    if (!highlightedField || !highlightedField.bbox || !imageDimensions) {
-      return null;
+  // Global ArrowLeft / ArrowRight scroll through pages. Skipped when focus
+  // is inside a form control or contenteditable — the document list / app
+  // keyboard handler has the same guard, so editing in a modal won't
+  // unexpectedly flip the viewer page.
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        handlePrev();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        handleNext();
+      }
     }
-    if (highlightedField.page !== currentPage) return null;
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handlePrev, handleNext]);
 
-    const { bbox } = highlightedField;
-    const { displayWidth, displayHeight } = imageDimensions;
+  // Convert a Docling bbox (coordinate origin either TOPLEFT or BOTTOMLEFT,
+  // measured in the page's native units) to pixel coordinates inside the
+  // rendered <img>. Returns null when we don't yet know the image dimensions
+  // (i.e. the PNG hasn't fired onLoad) — overlays simply don't render until
+  // we can place them accurately.
+  const projectBbox = useCallback(
+    (bbox) => {
+      if (!bbox || !imageDimensions) return null;
+      const { displayWidth, displayHeight } = imageDimensions;
+      const pageDims =
+        documentData?.page_dimensions?.[currentPage] || imageDimensions;
+      const pageWidth = pageDims.width;
+      const pageHeight = pageDims.height;
+      const scaleX = displayWidth / pageWidth;
+      const scaleY = displayHeight / pageHeight;
+      const isBottomOrigin =
+        bbox.coord_origin === "BOTTOMLEFT" || bbox.t > bbox.b;
+      const left = bbox.l * scaleX;
+      const width = (bbox.r - bbox.l) * scaleX;
+      let top, height;
+      if (isBottomOrigin) {
+        top = (pageHeight - bbox.t) * scaleY;
+        height = (bbox.t - bbox.b) * scaleY;
+      } else {
+        top = bbox.t * scaleY;
+        height = (bbox.b - bbox.t) * scaleY;
+      }
+      return { left, top, width, height };
+    },
+    [imageDimensions, documentData, currentPage],
+  );
 
-    const pageDims =
-      documentData?.page_dimensions?.[currentPage] || imageDimensions;
-    const pageWidth = pageDims.width;
-    const pageHeight = pageDims.height;
+  // All matched fields whose bbox lands on the current page. Each one renders
+  // as a low-opacity "ghost" overlay so users can see at-a-glance where
+  // extractions came from, without having to hover each field one by one.
+  const pageOverlays = useMemo(() => {
+    if (!extractedFields?.length) return [];
+    return extractedFields
+      .filter((f) => f.page === currentPage && f.bbox && f.matched_entry_id != null)
+      .map((f) => ({ ...f, rect: projectBbox(f.bbox) }))
+      .filter((f) => f.rect);
+  }, [extractedFields, currentPage, projectBbox]);
 
-    const scaleX = displayWidth / pageWidth;
-    const scaleY = displayHeight / pageHeight;
+  const highlightedEntryId = highlightedField?.matched_entry_id ?? null;
 
-    const isBottomOrigin =
-      bbox.coord_origin === "BOTTOMLEFT" || bbox.t > bbox.b;
-
-    const left = bbox.l * scaleX;
-    const width = (bbox.r - bbox.l) * scaleX;
-    let top, height;
-    if (isBottomOrigin) {
-      top = (pageHeight - bbox.t) * scaleY;
-      height = (bbox.t - bbox.b) * scaleY;
-    } else {
-      top = bbox.t * scaleY;
-      height = (bbox.b - bbox.t) * scaleY;
-    }
-
-    return {
-      position: "absolute",
-      left: `${left}px`,
-      top: `${top}px`,
-      width: `${width}px`,
-      height: `${height}px`,
-      backgroundColor: "rgba(15, 98, 254, 0.25)",
-      border: "2px solid #0f62fe",
-      borderRadius: "2px",
-      pointerEvents: "none",
-    };
-  }, [highlightedField, imageDimensions, documentData, currentPage]);
+  // Click-to-teach targets: every text entry on the current page that has a
+  // bbox we can project. Matched entries already have a ghost overlay, but
+  // the teach targets sit underneath at a lower z-index so unmatched text is
+  // discoverable too. Hover reveals a dashed outline + pointer cursor.
+  const teachTargets = useMemo(() => {
+    if (!onTeachEntry || !textEntries?.length) return [];
+    const matched = new Set(
+      (extractedFields || [])
+        .map((f) => f.matched_entry_id)
+        .filter((id) => id != null),
+    );
+    return textEntries
+      .filter((e) => e.page === currentPage && e.bbox)
+      .map((e) => ({
+        ...e,
+        rect: projectBbox(e.bbox),
+        alreadyMatched: matched.has(e.id),
+      }))
+      .filter((e) => e.rect);
+  }, [onTeachEntry, textEntries, extractedFields, currentPage, projectBbox]);
 
   const pageImageUrl = useMemo(
     () => (docId ? getPageImageUrl(docId, currentPage) : null),
@@ -199,14 +252,61 @@ export default function DocumentViewer({
             fetchpriority="high"
             decoding="async"
           />
-          {highlightStyle && (
-            <div
-              className="document-viewer__highlight"
-              data-testid="highlight-overlay"
-              role="presentation"
-              style={highlightStyle}
+          {teachTargets.map((e) => (
+            <button
+              key={`teach-${e.id}`}
+              type="button"
+              className={
+                "document-viewer__teach-target" +
+                (e.alreadyMatched ? " document-viewer__teach-target--matched" : "")
+              }
+              data-testid={`teach-target-${e.id}`}
+              aria-label={`Teach "${e.text}" as an example`}
+              title={`Click to teach "${e.text}" as an example for a field.`}
+              style={{
+                position: "absolute",
+                left: `${e.rect.left}px`,
+                top: `${e.rect.top}px`,
+                width: `${e.rect.width}px`,
+                height: `${e.rect.height}px`,
+              }}
+              onClick={() => onTeachEntry({ id: e.id, text: e.text, page: e.page })}
             />
-          )}
+          ))}
+          {pageOverlays.map((f) => {
+            const isActive = highlightedEntryId === f.matched_entry_id;
+            return (
+              <button
+                key={f.key}
+                type="button"
+                className={
+                  "document-viewer__highlight" +
+                  (isActive ? " document-viewer__highlight--active" : "")
+                }
+                data-testid={
+                  isActive ? "highlight-overlay" : `highlight-overlay-${f.key}`
+                }
+                aria-label={`Highlight for ${f.label}`}
+                style={{
+                  position: "absolute",
+                  left: `${f.rect.left}px`,
+                  top: `${f.rect.top}px`,
+                  width: `${f.rect.width}px`,
+                  height: `${f.rect.height}px`,
+                }}
+                onMouseEnter={() => onHoverField?.(f.field)}
+                onMouseLeave={() => onHoverField?.(null)}
+                onFocus={() => onHoverField?.(f.field)}
+                onBlur={() => onHoverField?.(null)}
+              >
+                {isActive && (
+                  <span className="document-viewer__highlight-label">
+                    {f.label}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>

@@ -128,6 +128,30 @@ async function request(path, {
   throw lastError || new Error(errorFallback);
 }
 
+// Multipart body — pass no Content-Type so fetch sets the boundary itself.
+// 120s timeout matches /extract; large PDFs need the headroom.
+export async function uploadDocument(file, { signal } = {}) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await request("/api/documents", {
+    method: "POST",
+    body: form,
+    signal,
+    timeoutMs: 120_000,
+    errorFallback: "Failed to upload document",
+  });
+  return res.json();
+}
+
+export async function deleteDocument(docId, { signal } = {}) {
+  const res = await request(`/api/documents/${docId}`, {
+    method: "DELETE",
+    signal,
+    errorFallback: "Failed to delete document",
+  });
+  return res.json();
+}
+
 export async function fetchDocuments({ signal } = {}) {
   const res = await request("/api/documents", {
     signal,
@@ -204,6 +228,28 @@ export async function updateDefinition(defId, definition, { signal } = {}) {
   return res.json();
 }
 
+// Revision archive. Listing returns metadata only — the JSON content of a
+// version is fetched separately. Both endpoints are idempotent GETs and
+// re-use the retry path from request().
+export async function fetchDefinitionVersions(defId, { signal } = {}) {
+  const res = await request(`/api/definitions/${defId}/versions`, {
+    signal,
+    errorFallback: "Failed to fetch definition versions",
+  });
+  return res.json();
+}
+
+export async function fetchDefinitionVersion(defId, versionId, { signal } = {}) {
+  const res = await request(
+    `/api/definitions/${defId}/versions/${encodeURIComponent(versionId)}`,
+    {
+      signal,
+      errorFallback: "Failed to fetch version",
+    },
+  );
+  return res.json();
+}
+
 export async function deleteDefinition(defId, { signal } = {}) {
   const res = await request(`/api/definitions/${defId}`, {
     method: "DELETE",
@@ -211,5 +257,91 @@ export async function deleteDefinition(defId, { signal } = {}) {
     errorFallback: "Failed to delete definition",
   });
   return res.json();
+}
+
+// Start a batch extract over the given document ids. Returns
+// `{ job_id, total, status }`. Poll getBatchStatus to track progress.
+export async function startBatchExtract(documentIds, definitionId, { signal } = {}) {
+  const res = await request("/api/extract/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ document_ids: documentIds, definition_id: definitionId }),
+    signal,
+    errorFallback: "Failed to start batch extraction",
+  });
+  return res.json();
+}
+
+export async function getBatchStatus(jobId, { signal } = {}) {
+  const res = await request(`/api/extract/batch/${jobId}`, {
+    signal,
+    errorFallback: "Failed to fetch batch status",
+  });
+  return res.json();
+}
+
+export async function cancelBatch(jobId, { signal } = {}) {
+  const res = await request(`/api/extract/batch/${jobId}`, {
+    method: "DELETE",
+    signal,
+    errorFallback: "Failed to cancel batch",
+  });
+  return res.json();
+}
+
+// Append a value to a field's `examples` list. The field path is either a
+// top-level field name or a one-level dotted path like "line_items.amount".
+// Returns the new examples array on success; throws on 404 (missing
+// field) / 409 (duplicate) so the caller can route those into the UI.
+export async function addFieldExample(defId, fieldPath, value, { signal } = {}) {
+  const res = await request(
+    `/api/definitions/${defId}/fields/${encodeURIComponent(fieldPath)}/examples`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+      signal,
+      errorFallback: "Failed to add example",
+    },
+  );
+  return res.json();
+}
+
+// Run extraction + target_tables transforms and return all rows as JSON.
+// CSV download is a separate function because it returns a blob, not JSON,
+// and needs a longer timeout for the cold-Docling case (mirrors /extract).
+export async function exportTablesJson(docId, definitionId, { signal } = {}) {
+  const qs = new URLSearchParams({ definition_id: definitionId });
+  const res = await request(`/api/documents/${docId}/export?${qs}`, {
+    signal,
+    timeoutMs: 120_000,
+    retries: 1,
+    errorFallback: "Failed to export tables",
+  });
+  return res.json();
+}
+
+// Download a single target table as a CSV blob. Returns `{ blob, filename }`
+// so the caller can hand the blob to URL.createObjectURL and use the server-
+// supplied Content-Disposition filename for the <a download> attribute.
+export async function exportTableCsv(docId, definitionId, table, { signal } = {}) {
+  const qs = new URLSearchParams({
+    definition_id: definitionId,
+    format: "csv",
+    table,
+  });
+  const res = await request(`/api/documents/${docId}/export?${qs}`, {
+    signal,
+    timeoutMs: 120_000,
+    retries: 1,
+    errorFallback: "Failed to export CSV",
+  });
+  // Parse the filename out of Content-Disposition; fall back to a generic
+  // name so the download is still usable if the header is missing.
+  const cd = res.headers.get("content-disposition") || "";
+  const m = /filename="([^"]+)"/.exec(cd);
+  const filename = m ? m[1] : `${docId}-${table}.csv`;
+  const blob = await res.blob();
+  return { blob, filename };
 }
 

@@ -1,0 +1,1188 @@
+{
+  "components": {
+    "schemas": {
+      "BatchExtractBody": {
+        "additionalProperties": false,
+        "description": "Body for the batch-extract endpoint.\n\n`document_ids` is bounded so a misconfigured client can't enqueue\nthousands of documents in a single request \u2014 the cap is also enforced\nin the route handler so the error message can name the actual limit.",
+        "properties": {
+          "definition_id": {
+            "minLength": 1,
+            "title": "Definition Id",
+            "type": "string"
+          },
+          "document_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Document Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "document_ids",
+          "definition_id"
+        ],
+        "title": "BatchExtractBody",
+        "type": "object"
+      },
+      "Body_upload_document_api_documents_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_document_api_documents_post",
+        "type": "object"
+      },
+      "DefinitionBody": {
+        "additionalProperties": true,
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/DocumentSpec"
+          }
+        },
+        "required": [
+          "document"
+        ],
+        "title": "DefinitionBody",
+        "type": "object"
+      },
+      "DocumentSpec": {
+        "additionalProperties": true,
+        "properties": {
+          "document_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Description"
+          },
+          "document_type": {
+            "minLength": 1,
+            "title": "Document Type",
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/FieldSpec"
+            },
+            "title": "Fields",
+            "type": "array"
+          }
+        },
+        "required": [
+          "document_type"
+        ],
+        "title": "DocumentSpec",
+        "type": "object"
+      },
+      "ExtractRequest": {
+        "properties": {
+          "definition_id": {
+            "minLength": 1,
+            "title": "Definition Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "definition_id"
+        ],
+        "title": "ExtractRequest",
+        "type": "object"
+      },
+      "FieldExampleBody": {
+        "additionalProperties": false,
+        "description": "Body for the click-to-teach endpoint.\n\nCarries just the example value to append. The field is identified in the\nURL path so a single endpoint can handle both top-level fields and dotted\npaths like `line_items.amount` without overloading the body.",
+        "properties": {
+          "value": {
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "FieldExampleBody",
+        "type": "object"
+      },
+      "FieldSpec": {
+        "additionalProperties": true,
+        "description": "Validation for a single field inside a definition's `document.fields`.\n\nExtra keys are permitted at every layer so future schema additions don't\nrequire a server update. `fields` is recursive to support `type: array`.",
+        "properties": {
+          "affix": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affix"
+          },
+          "available_options": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available Options"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "examples": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Examples"
+          },
+          "extraction_instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extraction Instructions"
+          },
+          "fields": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/FieldSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fields"
+          },
+          "min_confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Confidence"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pattern"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "use_llm_fallback": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Llm Fallback"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "FieldSpec",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Document Viewer API",
+    "version": "snapshot"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/definitions": {
+      "get": {
+        "description": "List document class definitions, paginated.\n\nSame envelope as /api/documents. Sorted by id for stable pagination.",
+        "operationId": "list_definitions_api_definitions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Definitions"
+      },
+      "post": {
+        "description": "Upload a new document class definition.\n\nValidated by Pydantic before this runs: missing/empty `document.document_type`\nor malformed `document.fields` returns 422 instead of crashing the matcher\nat extract time.\n\nIf a definition with the same slugged id already exists, returns 409\nConflict so a duplicate POST on retry doesn't silently overwrite the\nprevious version. Pass `?overwrite=true` (or use PATCH) to replace.\n\nWrite serialized on `_definitions_lock` so two concurrent POSTs can't\nrace each other into a half-written file.",
+        "operationId": "create_definition_api_definitions_post",
+        "parameters": [
+          {
+            "description": "Allow replacing an existing definition with the same id.",
+            "in": "query",
+            "name": "overwrite",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Allow replacing an existing definition with the same id.",
+              "title": "Overwrite",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DefinitionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Definition"
+      }
+    },
+    "/api/definitions/{def_id}": {
+      "delete": {
+        "description": "Remove a document class definition by id.\n\nReturns 404 if no definition with that id exists. The write side of the\ndefinitions store (create/patch/delete) is serialized on `_definitions_lock`\nso two concurrent mutations on the same id can't interleave into a\nhalf-written file or torn cache.",
+        "operationId": "delete_definition_api_definitions__def_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "def_id",
+            "required": true,
+            "schema": {
+              "title": "Def Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Definition"
+      },
+      "get": {
+        "description": "Get a specific document class definition.",
+        "operationId": "get_definition_api_definitions__def_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "def_id",
+            "required": true,
+            "schema": {
+              "title": "Def Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Definition"
+      },
+      "patch": {
+        "description": "Replace an existing definition in place.\n\nPydantic validates the body the same way `create_definition` does;\nsemantically this is \"upsert with id from the URL\". Returns 404 if the\ntarget doesn't exist (use POST to create), avoiding the foot-gun where a\ntypo in the URL silently creates a new definition under the wrong id.",
+        "operationId": "patch_definition_api_definitions__def_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "def_id",
+            "required": true,
+            "schema": {
+              "title": "Def Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DefinitionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Definition"
+      }
+    },
+    "/api/definitions/{def_id}/fields/{field_name}/examples": {
+      "post": {
+        "description": "Append a value to a field's `examples` list (click-to-teach).\n\nSupports a dotted path for one level of array sub-fields, e.g.\n``line_items.amount`` resolves to the ``amount`` sub-field of the\n``line_items`` array. Refuses duplicates with 409 so a repeated click\ndoesn't silently no-op (the caller can swallow the 409 if it prefers\nidempotent behavior).\n\nWrite-side is serialized on `_definitions_lock` and persisted via\n`_atomic_write_json`, matching every other definition mutation.",
+        "operationId": "add_field_example_api_definitions__def_id__fields__field_name__examples_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "def_id",
+            "required": true,
+            "schema": {
+              "title": "Def Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "field_name",
+            "required": true,
+            "schema": {
+              "title": "Field Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FieldExampleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Field Example"
+      }
+    },
+    "/api/definitions/{def_id}/versions": {
+      "get": {
+        "description": "List the revision archive for a definition (newest first).\nReturns metadata only; the content is fetched per-version.\n\n404 if neither the live definition nor any archived version exists\nfor this id \u2014 that combination only happens for a typo / never-used\nid, and the inconsistent 200 with empty items obscured the bug.\nA definition that has been deleted but had history still returns\n200 with the archived items so users can browse / resurrect it.",
+        "operationId": "list_definition_versions_api_definitions__def_id__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "def_id",
+            "required": true,
+            "schema": {
+              "title": "Def Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Definition Versions"
+      }
+    },
+    "/api/definitions/{def_id}/versions/{version_id}": {
+      "get": {
+        "description": "Fetch one archived version's full content.",
+        "operationId": "get_definition_version_api_definitions__def_id__versions__version_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "def_id",
+            "required": true,
+            "schema": {
+              "title": "Def Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Definition Version"
+      }
+    },
+    "/api/documents": {
+      "get": {
+        "description": "List documents in the test docs dir, paginated.\n\nThe response is a `{items, total, limit, offset}` envelope rather than a\nbare array; old callers can still read `items` to get the same shape.\nCached by directory signature so back-to-back GETs (e.g. polling) don't\nre-stat every file in the dir.",
+        "operationId": "list_documents_api_documents_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Documents"
+      },
+      "post": {
+        "description": "Accept a PDF/DOCX/PPTX upload and persist it under TEST_DOCS_DIR.\n\nValidates extension up-front; size is bounded by the body-size middleware\nusing a separate, larger cap for this path. A filename collision gets a\n`-1`, `-2`, \u2026 suffix rather than overwriting an existing document, so an\naccidental re-upload doesn't destroy an in-flight investigation.",
+        "operationId": "upload_document_api_documents_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_document_api_documents_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Document"
+      }
+    },
+    "/api/documents/{doc_id}": {
+      "delete": {
+        "description": "Remove a document from disk + flush every cache that referenced it.\n\nReturns 404 if no document with that id exists, mirroring the rest of\nthe API. Render / text caches are pruned so a re-upload under the same\nfilename (which would yield the same doc_id) won't serve stale\nrasterized pages from before the deletion.",
+        "operationId": "delete_document_api_documents__doc_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Document"
+      },
+      "get": {
+        "description": "Get document metadata. Fast \u2014 does not run text extraction or page rasterization.\n\nKicks off a background prefetch for page 1 + text extraction so by the\ntime the frontend renders the viewer and POSTs to /extract, both are\ntypically already in the cache.",
+        "operationId": "get_document_api_documents__doc_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Document"
+      }
+    },
+    "/api/documents/{doc_id}/export": {
+      "get": {
+        "description": "Run extraction + apply target_tables transforms, return flat rows.\n\nWraps `/extract` and the transform engine. JSON returns every target\ntable at once; CSV requires `?table=<name>` because a single CSV can't\nrepresent multiple tables coherently. Uses the same semaphore as\n`/extract` so this endpoint can't be used to bypass the concurrency cap.",
+        "operationId": "export_document_api_documents__doc_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Definition id to apply.",
+            "in": "query",
+            "name": "definition_id",
+            "required": true,
+            "schema": {
+              "description": "Definition id to apply.",
+              "title": "Definition Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "json (all tables) or csv (one table).",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "json",
+              "description": "json (all tables) or csv (one table).",
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required when format=csv: which target table to download. Ignored for format=json (which returns all tables).",
+            "in": "query",
+            "name": "table",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required when format=csv: which target table to download. Ignored for format=json (which returns all tables).",
+              "title": "Table"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Document"
+      }
+    },
+    "/api/documents/{doc_id}/extract": {
+      "post": {
+        "description": "Extract fields from a document using a definition.\n\nSync `def` (not async) so FastAPI dispatches this to the threadpool;\nDocling's `convert` blocks the calling thread, and using `async def` here\nwould freeze the event loop for the duration of every other request.\n\nTracked via `_track_inflight` so a SIGTERM during a long extraction\nwaits for completion (bounded by SCHEMABUILDER_SHUTDOWN_GRACE) instead\nof killing the Docling pipeline mid-run.\n\nCached on (doc_signature, matching-relevant definition fields). The\ncache survives restarts via SQLite. Pass ?refresh=true to bypass.",
+        "operationId": "extract_fields_api_documents__doc_id__extract_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Bypass the extraction cache.",
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Bypass the extraction cache.",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtractRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Extract Fields"
+      }
+    },
+    "/api/documents/{doc_id}/pages/{page_no}": {
+      "get": {
+        "description": "Get a rendered page image as PNG. Pages are rendered on demand and memoized.\n\n`page_no` is constrained to a sane range so junk like negative numbers or\n`page_no=999999` is rejected at the route boundary (422) instead of\npropagating through render and returning a confused 404. The upper bound\nis intentionally generous; any real PDF that exceeds it would already be\na server-side performance problem.\n\nSends an ETag tied to the file's mtime/size so the browser can revalidate\ncheaply once the max-age expires (or when the user reloads with a warm\ndisk cache); a matching If-None-Match short-circuits to 304 without\nre-sending the PNG bytes.",
+        "operationId": "get_page_image_api_documents__doc_id__pages__page_no__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "page_no",
+            "required": true,
+            "schema": {
+              "maximum": 10000,
+              "minimum": 1,
+              "title": "Page No",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Page Image"
+      }
+    },
+    "/api/extract/batch": {
+      "post": {
+        "description": "Kick off a batch extraction over `document_ids`.\n\nValidates the definition exists up-front (404 if not) and that the doc\ncount is within the cap (413 if not). Otherwise spawns a worker and\nreturns the new `job_id` immediately so the client can poll\n/api/extract/batch/{job_id} for progress.",
+        "operationId": "start_batch_extract_api_extract_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchExtractBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Batch Extract"
+      }
+    },
+    "/api/extract/batch/{job_id}": {
+      "delete": {
+        "description": "Signal the batch worker to stop after its current document.\n\nIn-flight extractions aren't interrupted \u2014 Docling has no cancellation\nhook \u2014 but no further documents will be enqueued. The job moves to\n`cancelled` once the worker observes the flag.",
+        "operationId": "cancel_batch_api_extract_batch__job_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Batch"
+      },
+      "get": {
+        "description": "Current state of a batch job. Returns 404 once the TTL has elapsed.\n\nSweeps stale jobs on the read path too \u2014 without this, a deployment\nthat ran a batch then sat idle (no further `start_batch_extract`\ncalls) would hold every completed job's result dicts in memory\nindefinitely. With sweep here, polling clients naturally trim the\ntable as old jobs age out.",
+        "operationId": "get_batch_status_api_extract_batch__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Batch Status"
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Liveness probe. Cheap; does not touch Docling or the filesystem\nbeyond what's already in memory. Always returns 200 if the process is up\nso an orchestrator can distinguish \"stuck\" from \"still warming\" by also\npolling /ready.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "description": "Snapshot of internal counters and cache utilization. Plain JSON so the\nfrontend or a simple Prometheus exporter can scrape it; format is stable\nenough to graph but not a public contract.",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics"
+      }
+    },
+    "/ready": {
+      "get": {
+        "description": "Readiness probe distinct from liveness.\n\nReturns 200 once the background warm-up has finished (or failed), so a\nKubernetes-style readinessProbe can hold traffic away from a freshly\nstarted replica until the first /extract won't pay model-load latency.\nReturns 503 with `Retry-After: 5` while warming so callers back off.",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready"
+      }
+    }
+  }
+}

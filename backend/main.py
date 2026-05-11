@@ -2,6 +2,7 @@
 
 import atexit
 import contextvars
+import csv
 import hashlib
 import io
 import json
@@ -19,12 +20,22 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi import File as FastAPIFile
 from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+import llm_fallback as _llm_fallback
+from extraction_cache import (
+    get_default_cache as _get_extraction_cache,
+)
+from extraction_cache import (
+    make_key as _make_extraction_cache_key,
+)
+from transforms import TransformError, build_export
 
 # Per-request context variable, surfaced into log records via the filter below
 # so every line emitted while handling a request carries the same id without
@@ -80,11 +91,29 @@ _SHUTDOWN_GRACE_SECONDS = float(os.getenv("SCHEMABUILDER_SHUTDOWN_GRACE") or 30)
 _MAX_CONCURRENT_EXTRACTS = max(1, int(os.getenv("SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS") or 4))
 _extract_semaphore = threading.BoundedSemaphore(_MAX_CONCURRENT_EXTRACTS)
 
+# In-memory tracker for batch-extract jobs. Each job advances sequentially —
+# the global _extract_semaphore already serializes individual extracts, so
+# spawning parallel batch workers would just contend on the same limit.
+# Garbage collected lazily on every new batch start: jobs older than the TTL
+# are dropped so the dict can't grow unbounded over the process lifetime.
+_batch_jobs: "dict[str, dict]" = {}
+_batch_jobs_lock = threading.Lock()
+_BATCH_JOB_TTL_SECONDS = max(60, int(os.getenv("SCHEMABUILDER_BATCH_TTL") or 3600))
+_BATCH_MAX_DOCS = max(1, int(os.getenv("SCHEMABUILDER_BATCH_MAX_DOCS") or 200))
+# Dedicated single-thread pool. One job at a time is enough — the semaphore
+# is the real bottleneck, and serial dispatch makes status reporting clean
+# (no per-doc interleaving in the completed counter).
+_batch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch")
+
 # Cap request body size (bytes). Definitions payloads are tiny in practice; a
 # huge body is either a misconfigured client or an attempt to OOM the matcher
 # by feeding it megabytes of `examples`. Enforced by middleware via
 # Content-Length so we reject before streaming the body into memory.
 _MAX_BODY_BYTES = max(1024, int(os.getenv("SCHEMABUILDER_MAX_BODY_BYTES") or 2_000_000))
+
+# Separate, much larger cap for document uploads — the body is a PDF/DOCX/
+# PPTX file, which routinely exceeds the JSON-payload cap. Default 50 MB.
+_MAX_DOC_BYTES = max(1024, int(os.getenv("SCHEMABUILDER_MAX_DOC_BYTES") or 50_000_000))
 
 # Strict allow-list for X-Request-ID: hex/ascii-safe so we don't propagate
 # header-injection junk into log lines or downstream tracers.
@@ -230,11 +259,17 @@ async def _enforce_body_size_limit(request: Request, call_next):
             n = int(cl)
         except ValueError:
             return Response(status_code=400, content="Invalid Content-Length")
-        if n > _MAX_BODY_BYTES:
+        # Document uploads have a separate, larger cap because PDFs are
+        # routinely larger than the JSON-payload limit.
+        if request.url.path == "/api/documents" and request.method == "POST":
+            limit = _MAX_DOC_BYTES
+        else:
+            limit = _MAX_BODY_BYTES
+        if n > limit:
             _metrics_inc("body_too_large")
             return Response(
                 status_code=413,
-                content=f"Request body exceeds {_MAX_BODY_BYTES} bytes",
+                content=f"Request body exceeds {limit} bytes",
             )
     return await call_next(request)
 
@@ -265,6 +300,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_documents"
 DEFINITIONS_DIR = Path(__file__).parent / "definitions"
+# Version archive lives inside DEFINITIONS_DIR under a hidden subdir. Both
+# the dir-signature scan and the loader filter on the .json suffix, so the
+# subdirectory itself is invisible to them; only its contents (also .json)
+# would be read, but they live one level deeper and aren't iterated.
+_VERSIONS_SUBDIR = ".versions"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
 
 # Hard caps on the per-doc caches so a long-running process or a directory of
@@ -361,7 +401,10 @@ _doc_listing_lock = threading.Lock()
 
 # Cached signatures per-definition (id, mtime) → list of (kind, pattern). Built
 # lazily and reused across extract calls for the same definition snapshot.
-_signature_cache: dict = {}
+# LRU-bounded so a deployment churning through many distinct definition
+# mtimes can't accumulate unbounded compiled-signature lists.
+_SIGNATURE_CACHE_MAX = int(os.getenv("SCHEMABUILDER_SIGNATURE_CACHE_MAX") or 256)
+_signature_cache: "OrderedDict" = OrderedDict()
 
 # Module-level Docling converters keyed by do_ocr. Construction loads
 # layout/OCR models which is slow; reuse instances across documents. The
@@ -373,8 +416,11 @@ _text_converters: dict = {}
 _text_converters_lock = threading.Lock()
 
 # Per-document OCR decision cache. Keyed by (filename, file signature) so a
-# file replaced in place is re-evaluated. Entries are bool.
-_ocr_decision_cache: dict = {}
+# file replaced in place is re-evaluated. Entries are bool. LRU-bounded so
+# a long-running process with many distinct documents can't grow it
+# without limit.
+_OCR_DECISION_CACHE_MAX = int(os.getenv("SCHEMABUILDER_OCR_CACHE_MAX") or 512)
+_ocr_decision_cache: "OrderedDict" = OrderedDict()
 _ocr_decision_lock = threading.Lock()
 
 # Doc IDs with a prefetch job already submitted/running. Prevents flooding the
@@ -394,6 +440,14 @@ _metrics: dict = {
     "ocr_decisions_on": 0,
     "ocr_decisions_off": 0,
     "extractions_completed": 0,
+    # SQLite extraction-cache stats. Hit rate ~= "how often /extract
+    # returned a cached response" — useful for tuning the cache size.
+    "extractions_cache_hits": 0,
+    "extractions_cache_misses": 0,
+    # Count of fields where the rule-based matcher failed and the LLM
+    # fallback was invoked successfully. Useful for tracking how much
+    # users are leaning on Anthropic API spend.
+    "llm_fallback_used": 0,
     # Incremented when a request is rejected because the global concurrency
     # cap is full. A non-zero rate here is a signal to bump
     # SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS or scale the process out.
@@ -735,7 +789,7 @@ def _resolve_ocr_decision(filepath: Path) -> bool:
                 "OCR detection failed for %s; defaulting to no OCR", filepath.name
             )
             decision = False
-        _ocr_decision_cache[key] = decision
+        _lru_set(_ocr_decision_cache, key, decision, _OCR_DECISION_CACHE_MAX)
         _metrics_inc("ocr_decisions_on" if decision else "ocr_decisions_off")
         logger.info(
             "OCR decision for %s: %s", filepath.name, "on" if decision else "off"
@@ -1151,12 +1205,18 @@ def _load_definitions() -> dict:
         return defs
 
 
-def _invalidate_definitions_cache() -> None:
+def _invalidate_definitions_cache_locked() -> None:
+    """Caller must already hold `_definitions_lock`. Used inside mutation
+    routes that take the lock for the whole write."""
     global _definitions_cache, _definitions_signature
+    _definitions_cache = None
+    _definitions_signature = None
+    _signature_cache.clear()
+
+
+def _invalidate_definitions_cache() -> None:
     with _definitions_lock:
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
 
 
 # Static, module-level patterns: cheaper than recompiling on every entry.
@@ -1211,6 +1271,15 @@ def _build_field_signatures(definition: dict) -> list:
                         ("regex", re.compile(r'\b' + re.escape(str(opt)) + r'\b', re.IGNORECASE))
                     )
 
+            # User-supplied pattern: include in signatures so an entry that
+            # only matches the regex (no example overlap) isn't pre-filtered.
+            raw_pat = field.get("pattern")
+            if isinstance(raw_pat, str) and raw_pat:
+                try:
+                    signatures.append(("regex", re.compile(raw_pat)))
+                except re.error:
+                    pass
+
             label = str(field.get("name", "")).replace("_", " ").lower().strip()
             if label:
                 signatures.append(("literal", label))
@@ -1227,7 +1296,7 @@ def _get_signatures_for(def_id: str, definition: dict) -> list:
     if cached is not None:
         return cached
     built = _build_field_signatures(definition)
-    _signature_cache[key] = built
+    _lru_set(_signature_cache, key, built, _SIGNATURE_CACHE_MAX)
     return built
 
 
@@ -1287,6 +1356,18 @@ def _compile_field_matchers(field: dict) -> dict:
 
     label = str(field.get("name", "")).replace("_", " ").lower()
 
+    # Compile the user-supplied regex once. Validation already happened at
+    # upload time (FieldSpec.field_validator); the try/except here is a belt-
+    # and-suspenders against a definition that bypassed Pydantic somehow
+    # (direct file edit, older format on disk).
+    pattern = None
+    raw_pattern = field.get("pattern")
+    if isinstance(raw_pattern, str) and raw_pattern:
+        try:
+            pattern = re.compile(raw_pattern)
+        except re.error:
+            pattern = None
+
     return {
         "example_lower": example_lower,
         "example_lower_strip": example_lower_strip,
@@ -1296,6 +1377,7 @@ def _compile_field_matchers(field: dict) -> dict:
         "has_id": has_id,
         "has_decimal": has_decimal,
         "has_currency_sign": has_currency_sign,
+        "pattern": pattern,
     }
 
 
@@ -1331,10 +1413,15 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
     has_id = m["has_id"]
     has_decimal = m["has_decimal"]
     has_currency_sign = m["has_currency_sign"]
+    pattern = m["pattern"]
 
     best_match = None
     best_score = 0
     best_reason: Optional[str] = None
+    # When the winning signal is `pattern_match`, store the matched substring
+    # so we can return just the regex hit (e.g. the IBAN) rather than the
+    # entire enclosing text entry. Cleared whenever a non-pattern signal wins.
+    best_pattern_substring: Optional[str] = None
 
     for entry in text_entries:
         if entry["id"] in used_ids:
@@ -1399,10 +1486,36 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
                 score = 60
                 reason = "label"
 
+        # User-supplied pattern: scored 92, between example_substring (80) and
+        # example_exact (95). A hand-crafted regex is a strong signal of
+        # intent — it should beat heuristic format detection but not an exact
+        # example string.
+        pattern_substring: Optional[str] = None
+        if pattern is not None:
+            pm = pattern.search(text)
+            if pm and score < 92:
+                score = 92
+                reason = "pattern_match"
+                pattern_substring = pm.group(1) if pm.groups() else pm.group(0)
+
         if score > best_score:
             best_score = score
             best_match = entry
             best_reason = reason
+            best_pattern_substring = (
+                pattern_substring if reason == "pattern_match" else None
+            )
+
+    # Per-field acceptance threshold (0–1). Defaults to 0.5 to preserve the
+    # historical 50/100 cutoff. A definition can raise it (strict fields like
+    # invoice_id) or lower it (fuzzy fields like vendor names). Anything that
+    # isn't a finite number in range is clamped to the default; we never want
+    # a typo in the JSON to turn off matching entirely.
+    raw_threshold = field.get("min_confidence")
+    if isinstance(raw_threshold, (int, float)) and 0.0 <= raw_threshold <= 1.0:
+        score_cutoff = int(raw_threshold * 100)
+    else:
+        score_cutoff = 50
 
     result = {
         "name": field["name"],
@@ -1411,6 +1524,10 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         "extraction_instructions": field.get("extraction_instructions"),
         "available_options": field.get("available_options"),
         "affix": field.get("affix"),
+        "pattern": field.get("pattern") if isinstance(field.get("pattern"), str) else None,
+        "min_confidence": raw_threshold
+        if isinstance(raw_threshold, (int, float)) and 0.0 <= raw_threshold <= 1.0
+        else None,
         "extracted_value": None,
         "confidence": 0,
         "matched_entry_id": None,
@@ -1421,17 +1538,37 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         # when nothing scored above threshold.
         "match_reason": None,
         "match_score": 0,
+        # When the best candidate scored below the field's threshold, surface
+        # its text so the user can decide whether to lower the threshold or
+        # teach a new example. This is observability, not a match — the
+        # field's extracted_value stays None.
+        "rejected_candidate": None,
     }
 
-    if best_match and best_score >= 50:
+    if best_match and best_score >= score_cutoff:
         used_ids.add(best_match["id"])
-        result["extracted_value"] = best_match["text"]
+        # Pattern matches return just the captured substring (the IBAN, the
+        # VAT id, etc.) rather than the surrounding sentence. Other signals
+        # return the full entry text — that's been the contract since day one.
+        if best_reason == "pattern_match" and best_pattern_substring is not None:
+            result["extracted_value"] = best_pattern_substring
+        else:
+            result["extracted_value"] = best_match["text"]
         result["confidence"] = best_score / 100.0
         result["matched_entry_id"] = best_match["id"]
         result["page"] = best_match.get("page")
         result["bbox"] = best_match.get("bbox")
         result["match_reason"] = best_reason
         result["match_score"] = best_score
+    elif best_match and best_score > 0:
+        # Below threshold but non-zero: surface the rejected candidate so the
+        # UI can offer a "review — was this the right value?" prompt.
+        result["rejected_candidate"] = {
+            "text": best_match["text"],
+            "score": best_score,
+            "confidence": best_score / 100.0,
+            "page": best_match.get("page"),
+        }
 
     return result
 
@@ -1543,6 +1680,47 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
     for field in fields:
         result = _match_field_to_entries(field, candidates, used_ids)
         results.append(result)
+
+    # LLM fallback pass. Top-level scalar fields only — arrays go through
+    # their own per-item path and would need a different prompt design.
+    # The fallback never overrides a successful matcher hit; it only fills
+    # in fields that came back empty AND opted in via `use_llm_fallback`.
+    needing_fallback = [
+        (i, f)
+        for i, f in enumerate(fields)
+        if f.get("type") != "array"
+        and f.get("use_llm_fallback")
+        and results[i].get("extracted_value") is None
+    ]
+    if needing_fallback and _llm_fallback.is_available():
+        document_text = "\n".join(
+            e.get("text", "") for e in text_entries if isinstance(e, dict)
+        )
+        for i, field in needing_fallback:
+            try:
+                llm_result = _llm_fallback.extract_field(
+                    field_name=field.get("name", ""),
+                    field_description=field.get("description") or "",
+                    examples=field.get("examples"),
+                    document_text=document_text,
+                )
+            except Exception:
+                logger.exception(
+                    "LLM fallback raised for field %s", field.get("name")
+                )
+                continue
+            if not llm_result:
+                continue
+            results[i]["extracted_value"] = llm_result["value"]
+            results[i]["confidence"] = llm_result["confidence"]
+            results[i]["match_reason"] = "llm_fallback"
+            results[i]["match_score"] = int(llm_result["confidence"] * 100)
+            # LLM fallback can't tie back to a specific text_entry, so
+            # matched_entry_id / page / bbox stay None — the FieldsPanel
+            # already renders that case fine and just won't draw an
+            # overlay for the field.
+            results[i]["rejected_candidate"] = None
+            _metrics_inc("llm_fallback_used")
     return results
 
 
@@ -1698,6 +1876,156 @@ def list_documents(
     return _paginate(docs, limit, offset)
 
 
+_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_upload_filename(name: str) -> str:
+    """Strip directory components and unsafe characters from an uploaded
+    filename. The extension is preserved (lowercased) and validated against
+    SUPPORTED_EXTENSIONS by the caller.
+    """
+    # Take the basename only — `Path.name` is robust against both
+    # forward- and back-slash separators that a Windows client might send.
+    base = Path(name).name
+    stem = Path(base).stem
+    ext = Path(base).suffix.lower()
+    # Replace anything that isn't filename-safe with an underscore. We keep
+    # dots in the stem to a single trailing one removed below.
+    clean_stem = _FILENAME_SAFE_RE.sub("_", stem).strip("._-")
+    return (clean_stem or "document") + ext
+
+
+def _allocate_unique_path(directory: Path, filename: str) -> Path:
+    """Return a path inside `directory` that doesn't collide with existing
+    files; appends `-1`, `-2`, … to the stem until it's free.
+    """
+    stem = Path(filename).stem
+    ext = Path(filename).suffix
+    candidate = directory / filename
+    n = 1
+    while candidate.exists():
+        candidate = directory / f"{stem}-{n}{ext}"
+        n += 1
+    return candidate
+
+
+def _invalidate_doc_listing_cache() -> None:
+    """Drop the document listing + path caches after a mutation. The
+    signature-based cache would self-heal on the next request, but clearing
+    eagerly avoids a small window where the listing is stale right after
+    an upload/delete returns 200."""
+    global _doc_listing_cache, _doc_listing_signature
+    with _doc_listing_lock:
+        _doc_listing_cache = None
+        _doc_listing_signature = None
+    with _doc_path_cache_lock:
+        _doc_path_cache.clear()
+
+
+@app.post("/api/documents")
+async def upload_document(file: UploadFile = FastAPIFile(...)):
+    """Accept a PDF/DOCX/PPTX upload and persist it under TEST_DOCS_DIR.
+
+    Validates extension up-front; size is bounded by the body-size middleware
+    using a separate, larger cap for this path. A filename collision gets a
+    `-1`, `-2`, … suffix rather than overwriting an existing document, so an
+    accidental re-upload doesn't destroy an in-flight investigation.
+    """
+    raw = file.filename or "upload"
+    cleaned = _sanitize_upload_filename(raw)
+    ext = Path(cleaned).suffix
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"Unsupported file type {ext!r}. "
+                f"Allowed: {sorted(SUPPORTED_EXTENSIONS)}."
+            ),
+        )
+
+    TEST_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    target = _allocate_unique_path(TEST_DOCS_DIR, cleaned)
+
+    # Stream to a temp file in the same dir, enforce the size cap, then
+    # rename — avoids a partial file landing under the real name if the
+    # client disconnects or the body exceeds the cap.
+    tmp_fd, tmp_path_str = tempfile.mkstemp(
+        prefix=target.stem + ".", suffix=ext + ".part", dir=str(TEST_DOCS_DIR)
+    )
+    tmp_path = Path(tmp_path_str)
+    written = 0
+    try:
+        with os.fdopen(tmp_fd, "wb") as out:
+            while True:
+                chunk = await file.read(1 << 20)  # 1 MB
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _MAX_DOC_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload exceeds {_MAX_DOC_BYTES} bytes.",
+                    )
+                out.write(chunk)
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    _invalidate_doc_listing_cache()
+    doc_id = _get_document_id(target.name)
+    return {
+        "id": doc_id,
+        "filename": target.name,
+        "extension": ext,
+        "size": written,
+    }
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """Remove a document from disk + flush every cache that referenced it.
+
+    Returns 404 if no document with that id exists, mirroring the rest of
+    the API. Render / text caches are pruned so a re-upload under the same
+    filename (which would yield the same doc_id) won't serve stale
+    rasterized pages from before the deletion.
+    """
+    filepath = _find_file(doc_id)
+    if not filepath:
+        raise HTTPException(status_code=404, detail="Document not found")
+    # Capture the file signature BEFORE deleting so the extraction-cache
+    # invalidation can find rows for this doc; once the file is gone,
+    # _file_signature() returns the directory-fallback tuple.
+    doc_sig = _file_signature(filepath)
+    try:
+        filepath.unlink()
+    except OSError as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete document: {e}"
+        ) from e
+
+    # Purge every cache that keyed on this doc_id; otherwise a follow-up
+    # GET would either 200 from the listing cache or render a stale PNG.
+    # _ocr_decision_cache is keyed by (filename, file-signature) — clear
+    # whole-hog rather than scan, since deletes are infrequent and the
+    # cache rebuilds itself on the next extract. The SQLite extraction
+    # cache is invalidated by signature so other documents' cached
+    # extractions survive.
+    _render_cache.pop(doc_id, None)
+    _text_cache.pop(doc_id, None)
+    _ocr_decision_cache.clear()
+    try:
+        _get_extraction_cache().invalidate_by_doc_signature(doc_sig)
+    except Exception:
+        logger.exception("Failed to invalidate extraction cache for %s", doc_id)
+    _invalidate_doc_listing_cache()
+    return {"id": doc_id, "deleted": True}
+
+
 @app.get("/api/documents/{doc_id}")
 def get_document(doc_id: str):
     """Get document metadata. Fast — does not run text extraction or page rasterization.
@@ -1829,6 +2157,9 @@ def delete_definition(def_id: str):
     with _definitions_lock:
         if not filepath.exists():
             raise HTTPException(status_code=404, detail="Definition not found")
+        # Archive before unlinking so the user can resurrect the
+        # definition by POSTing the archived content.
+        _archive_existing(def_id, "delete", filepath)
         try:
             filepath.unlink()
         except OSError as e:
@@ -1836,10 +2167,7 @@ def delete_definition(def_id: str):
             raise HTTPException(status_code=500, detail=f"Failed to delete: {e}") from e
         # Reset cache state under the same lock so a concurrent /api/definitions
         # GET can't observe stale post-delete state.
-        global _definitions_cache, _definitions_signature
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
     return {"id": def_id, "deleted": True}
 
 
@@ -1859,7 +2187,35 @@ class FieldSpec(BaseModel):
     examples: Optional[List[Any]] = None
     available_options: Optional[List[Any]] = None
     affix: Optional[bool] = None
+    # Per-field acceptance threshold for the matcher. 0–1 inclusive. When
+    # None the matcher falls back to its historical 0.5 cutoff. Validated
+    # here so a malformed value lands as a 422 instead of getting silently
+    # ignored inside the matcher.
+    min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # Optional regular expression. When set, any text entry whose text
+    # matches becomes a strong candidate (matcher score 92, between
+    # example_substring=80 and example_exact=95). The matched substring is
+    # what ends up in extracted_value — use a capture group to scope it to
+    # the part you want (e.g. "IBAN: (DE\\d{20})"). Validated as a
+    # compilable Python regex at upload time.
+    pattern: Optional[str] = None
+    # When True, consult an LLM via the Anthropic SDK if the rule-based
+    # matcher couldn't find a value. Per-field opt-in so a single click
+    # doesn't fan out into surprise API spend across every field. Requires
+    # ANTHROPIC_API_KEY + the `anthropic` package; silently no-op otherwise.
+    use_llm_fallback: Optional[bool] = None
     fields: Optional[List["FieldSpec"]] = None
+
+    @field_validator("pattern")
+    @classmethod
+    def _validate_regex(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(f"pattern is not a valid regular expression: {e}") from e
+        return v
 
 
 FieldSpec.model_rebuild()
@@ -1911,6 +2267,120 @@ def _atomic_write_json(filepath: Path, payload: dict) -> None:
         raise
 
 
+_VERSION_FILENAME_RE = re.compile(r"^(\d+)-([a-z]+)\.json$")
+
+
+def _versions_dir_for(def_id: str) -> Path:
+    """Per-definition revision archive. Lives under DEFINITIONS_DIR but in
+    a hidden `.versions/<def_id>/` subdir so it doesn't pollute the
+    definition listing or signature scan."""
+    return DEFINITIONS_DIR / _VERSIONS_SUBDIR / def_id
+
+
+def _archive_existing(def_id: str, action: str, src_path: Path) -> Optional[Path]:
+    """Snapshot the existing definition file at `src_path` into the
+    version dir for `def_id`. Byte-copy — no parse, no re-serialize, so
+    the archived bytes are exactly what was on disk and the archive can
+    never drift from the source via a Pydantic round-trip.
+
+    Filename is `{timestamp_ms}-{action}.json`; timestamp doubles as the
+    revision id surfaced via the API. Archiving must never block the
+    mutation it precedes, so every failure is logged and swallowed.
+    """
+    try:
+        vdir = _versions_dir_for(def_id)
+        vdir.mkdir(parents=True, exist_ok=True)
+        ts_ms = int(time.time() * 1000)
+        # Loop-protect against clock-resolution collisions when two writes
+        # land in the same millisecond.
+        for attempt in range(5):
+            candidate = vdir / f"{ts_ms + attempt}-{action}.json"
+            if not candidate.exists():
+                shutil.copyfile(src_path, candidate)
+                return candidate
+        logger.warning(
+            "Archive collision-loop exhausted for %s at ts=%s; version dropped",
+            def_id, ts_ms,
+        )
+    except Exception:
+        logger.exception("Failed to archive version for %s", def_id)
+    return None
+
+
+def _list_versions(def_id: str) -> list:
+    """List archived versions for a definition, newest first. Metadata
+    only (no content) — clients fetch a specific version separately when
+    they want to render it."""
+    vdir = _versions_dir_for(def_id)
+    if not vdir.exists():
+        return []
+    out = []
+    try:
+        for f in vdir.iterdir():
+            m = _VERSION_FILENAME_RE.match(f.name)
+            if not m:
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            out.append(
+                {
+                    "id": f.name[:-5],  # drop ".json"
+                    "timestamp_ms": int(m.group(1)),
+                    "action": m.group(2),
+                    "size": st.st_size,
+                }
+            )
+    except OSError:
+        return []
+    out.sort(key=lambda v: v["timestamp_ms"], reverse=True)
+    return out
+
+
+def _read_version(def_id: str, version_id: str) -> Optional[dict]:
+    """Load one archived version's full content. Returns None if the
+    version file is missing or unparseable."""
+    if not _VERSION_FILENAME_RE.match(version_id + ".json"):
+        return None
+    path = _versions_dir_for(def_id) / f"{version_id}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+@app.get("/api/definitions/{def_id}/versions")
+def list_definition_versions(def_id: str):
+    """List the revision archive for a definition (newest first).
+    Returns metadata only; the content is fetched per-version.
+
+    404 if neither the live definition nor any archived version exists
+    for this id — that combination only happens for a typo / never-used
+    id, and the inconsistent 200 with empty items obscured the bug.
+    A definition that has been deleted but had history still returns
+    200 with the archived items so users can browse / resurrect it."""
+    _validate_def_id_shape(def_id)
+    live_exists = (DEFINITIONS_DIR / f"{def_id}.json").exists()
+    items = _list_versions(def_id)
+    if not live_exists and not items:
+        raise HTTPException(status_code=404, detail="Definition not found")
+    return {"items": items, "id": def_id}
+
+
+@app.get("/api/definitions/{def_id}/versions/{version_id}")
+def get_definition_version(def_id: str, version_id: str):
+    """Fetch one archived version's full content."""
+    _validate_def_id_shape(def_id)
+    payload = _read_version(def_id, version_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return payload
+
+
 @app.post("/api/definitions")
 def create_definition(
     body: DefinitionBody,
@@ -1951,11 +2421,12 @@ def create_definition(
                     f"Use PATCH /api/definitions/{def_id} or POST with ?overwrite=true."
                 ),
             )
+        # Forced overwrite: archive the about-to-be-replaced content
+        # first so users can roll back.
+        if filepath.exists():
+            _archive_existing(def_id, "overwrite", filepath)
         _atomic_write_json(filepath, payload)
-        global _definitions_cache, _definitions_signature
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
 
     return {
         "id": def_id,
@@ -1979,11 +2450,10 @@ def patch_definition(def_id: str, body: DefinitionBody):
     with _definitions_lock:
         if not filepath.exists():
             raise HTTPException(status_code=404, detail="Definition not found")
+        # Archive the current version so the user can roll back.
+        _archive_existing(def_id, "patch", filepath)
         _atomic_write_json(filepath, payload)
-        global _definitions_cache, _definitions_signature
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
     return {
         "id": def_id,
         "document_type": body.document.document_type,
@@ -1991,8 +2461,101 @@ def patch_definition(def_id: str, body: DefinitionBody):
     }
 
 
+class FieldExampleBody(BaseModel):
+    """Body for the click-to-teach endpoint.
+
+    Carries just the example value to append. The field is identified in the
+    URL path so a single endpoint can handle both top-level fields and dotted
+    paths like `line_items.amount` without overloading the body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1)
+
+
+def _resolve_field(fields: list, name: str) -> Optional[dict]:
+    """Locate a field by name within a fields list (no recursion across
+    arrays — top-level only)."""
+    if not isinstance(fields, list):
+        return None
+    for f in fields:
+        if isinstance(f, dict) and f.get("name") == name:
+            return f
+    return None
+
+
+@app.post("/api/definitions/{def_id}/fields/{field_name}/examples")
+def add_field_example(def_id: str, field_name: str, body: FieldExampleBody):
+    """Append a value to a field's `examples` list (click-to-teach).
+
+    Supports a dotted path for one level of array sub-fields, e.g.
+    ``line_items.amount`` resolves to the ``amount`` sub-field of the
+    ``line_items`` array. Refuses duplicates with 409 so a repeated click
+    doesn't silently no-op (the caller can swallow the 409 if it prefers
+    idempotent behavior).
+
+    Write-side is serialized on `_definitions_lock` and persisted via
+    `_atomic_write_json`, matching every other definition mutation.
+    """
+    _validate_def_id_shape(def_id)
+    filepath = DEFINITIONS_DIR / f"{def_id}.json"
+
+    parts = field_name.split(".")
+    if len(parts) > 2 or any(not p for p in parts):
+        raise HTTPException(
+            status_code=400,
+            detail="field_name must be 'name' or 'array.subname'.",
+        )
+
+    with _definitions_lock:
+        if not filepath.exists():
+            raise HTTPException(status_code=404, detail="Definition not found")
+        with open(filepath) as f:
+            definition = json.load(f)
+        doc_fields = definition.get("document", {}).get("fields", [])
+        field = _resolve_field(doc_fields, parts[0])
+        if not field:
+            raise HTTPException(
+                status_code=404, detail=f"Field '{parts[0]}' not found"
+            )
+        if len(parts) == 2:
+            if field.get("type") != "array":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Field '{parts[0]}' is not an array; cannot use dotted path.",
+                )
+            sub = _resolve_field(field.get("fields", []), parts[1])
+            if not sub:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Sub-field '{parts[1]}' not found on '{parts[0]}'.",
+                )
+            field = sub
+
+        examples = field.setdefault("examples", [])
+        if body.value in examples:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Example {body.value!r} already exists for field '{field_name}'.",
+            )
+        examples.append(body.value)
+        _atomic_write_json(filepath, definition)
+        _invalidate_definitions_cache_locked()
+
+    return {
+        "id": def_id,
+        "field": field_name,
+        "examples": examples,
+    }
+
+
 @app.post("/api/documents/{doc_id}/extract")
-def extract_fields(doc_id: str, body: ExtractRequest):
+def extract_fields(
+    doc_id: str,
+    body: ExtractRequest,
+    refresh: bool = Query(False, description="Bypass the extraction cache."),
+):
     """Extract fields from a document using a definition.
 
     Sync `def` (not async) so FastAPI dispatches this to the threadpool;
@@ -2002,6 +2565,9 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     Tracked via `_track_inflight` so a SIGTERM during a long extraction
     waits for completion (bounded by SCHEMABUILDER_SHUTDOWN_GRACE) instead
     of killing the Docling pipeline mid-run.
+
+    Cached on (doc_signature, matching-relevant definition fields). The
+    cache survives restarts via SQLite. Pass ?refresh=true to bypass.
     """
     filepath = _find_file(doc_id)
     if not filepath:
@@ -2011,11 +2577,154 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     defs = _load_definitions()
     if def_id not in defs:
         raise HTTPException(status_code=404, detail="Definition not found")
+    definition = defs[def_id]
 
-    # Bounded semaphore prevents pile-on: Docling pipelines hold large model
-    # state and serialize internally, so admitting unlimited concurrent
-    # extractions just queues them while burning RSS. Reject fast with 503
-    # so clients (and any upstream LB) can back off / shed.
+    # Cache lookup. The key composes the file signature (so a re-upload
+    # under the same name invalidates) with a hash of the matcher-relevant
+    # subset of the definition (so an edit to examples / pattern /
+    # min_confidence invalidates, but an edit to target_tables doesn't).
+    doc_sig = _file_signature(filepath)
+    cache = _get_extraction_cache()
+    cache_key = _make_extraction_cache_key(doc_sig, definition)
+    cache_hit = False
+    response: Optional[dict] = None
+    if not refresh:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            response = cached
+            cache_hit = True
+            _metrics_inc("extractions_cache_hits")
+
+    if response is None:
+        # Bounded semaphore prevents pile-on: Docling pipelines hold large
+        # model state and serialize internally, so admitting unlimited
+        # concurrent extractions just queues them while burning RSS. Reject
+        # fast with 503 so clients (and any upstream LB) can back off /
+        # shed.
+        if not _extract_semaphore.acquire(blocking=False):
+            _metrics_inc("extractions_rejected")
+            raise HTTPException(
+                status_code=503,
+                detail="Too many concurrent extractions; retry shortly.",
+                headers={"Retry-After": "5"},
+            )
+        try:
+            with _track_inflight():
+                text_data = _get_or_extract_text(filepath)
+                fields = _extract_fields(
+                    definition, text_data["text_entries"], def_id=def_id
+                )
+                _metrics_inc("extractions_completed")
+                _metrics_inc("extractions_cache_misses")
+        finally:
+            _extract_semaphore.release()
+
+        target_table_names = [
+            t.get("name")
+            for t in (definition.get("target_tables") or [])
+            if isinstance(t, dict) and t.get("name")
+        ]
+        response = {
+            "document_id": doc_id,
+            "definition_id": def_id,
+            "document_type": definition.get("document", {}).get("document_type", ""),
+            "document_description": definition.get("document", {}).get(
+                "document_description", ""
+            ),
+            "fields": fields,
+            "page_dimensions": text_data["page_dimensions"],
+            "target_tables": target_table_names,
+            # Full text entry list so the frontend can offer "click to
+            # teach as an example" against any extracted block. Cheap to
+            # include — already computed.
+            "text_entries": text_data.get("text_entries", []),
+        }
+        if text_data.get("extraction_error"):
+            response["extraction_error"] = text_data["extraction_error"]
+        # Skip caching when extraction errored — the user almost always
+        # wants a fresh attempt next time, not a frozen failure.
+        if not text_data.get("extraction_error"):
+            cacheable = dict(response)
+            # Stash the doc signature on the cached payload so the cache
+            # can invalidate-by-signature on document delete without
+            # reversing the hash.
+            cacheable["_doc_signature"] = list(doc_sig)
+            cache.put(cache_key, cacheable)
+
+    # Always echo the cache state so clients can show "cached" badges /
+    # offer a refresh action. Stripped from the SQLite-stored payload.
+    out = dict(response)
+    out.pop("_doc_signature", None)
+    out["cache_hit"] = cache_hit
+    return out
+
+
+def _csv_response(table_name: str, rows: list[dict], filename_stem: str) -> Response:
+    """Serialize a single result table as CSV with stable column order.
+
+    Column order is taken from the first row's keys, which (because
+    `build_export` preserves the definition's column order via dict insertion)
+    matches the definition. Empty result sets emit just the header so the
+    downstream consumer can still tell schema from data.
+    """
+    buf = io.StringIO()
+    if rows:
+        fieldnames = list(rows[0].keys())
+    else:
+        fieldnames = []
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
+    body = buf.getvalue().encode("utf-8")
+    safe_stem = _FILENAME_SAFE_RE.sub("_", filename_stem).strip("_") or "export"
+    safe_table = _FILENAME_SAFE_RE.sub("_", table_name).strip("_") or "table"
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{safe_stem}-{safe_table}.csv"'
+            ),
+        },
+    )
+
+
+@app.get("/api/documents/{doc_id}/export")
+def export_document(
+    doc_id: str,
+    definition_id: str = Query(..., description="Definition id to apply."),
+    format: str = Query("json", description="json (all tables) or csv (one table)."),
+    table: Optional[str] = Query(
+        None,
+        description=(
+            "Required when format=csv: which target table to download. "
+            "Ignored for format=json (which returns all tables)."
+        ),
+    ),
+):
+    """Run extraction + apply target_tables transforms, return flat rows.
+
+    Wraps `/extract` and the transform engine. JSON returns every target
+    table at once; CSV requires `?table=<name>` because a single CSV can't
+    represent multiple tables coherently. Uses the same semaphore as
+    `/extract` so this endpoint can't be used to bypass the concurrency cap.
+    """
+    # Validate format in-band so we don't depend on Query(regex=) which has
+    # moved name across FastAPI/Pydantic versions (regex → pattern).
+    if format not in ("json", "csv"):
+        raise HTTPException(
+            status_code=400, detail="format must be 'json' or 'csv'."
+        )
+    filepath = _find_file(doc_id)
+    if not filepath:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    defs = _load_definitions()
+    if definition_id not in defs:
+        raise HTTPException(status_code=404, detail="Definition not found")
+    definition = defs[definition_id]
+
     if not _extract_semaphore.acquire(blocking=False):
         _metrics_inc("extractions_rejected")
         raise HTTPException(
@@ -2026,27 +2735,226 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     try:
         with _track_inflight():
             text_data = _get_or_extract_text(filepath)
-            definition = defs[def_id]
-            fields = _extract_fields(definition, text_data["text_entries"], def_id=def_id)
+            fields = _extract_fields(
+                definition, text_data["text_entries"], def_id=definition_id
+            )
             _metrics_inc("extractions_completed")
     finally:
         _extract_semaphore.release()
 
-    response: dict = {
+    try:
+        tables = build_export(definition, doc_id, fields)
+    except TransformError as e:
+        # Definition-level bug (unknown transform, malformed source, etc.) —
+        # surface as 422 so the client knows the input was bad, not the
+        # server. The exact message is safe to leak; it points at the
+        # offending definition, not user data.
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    if format == "csv":
+        if not table:
+            raise HTTPException(
+                status_code=400,
+                detail="CSV export requires ?table=<name>; use format=json for all tables.",
+            )
+        if table not in tables:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table}' not found in definition '{definition_id}'.",
+            )
+        return _csv_response(table, tables[table], filename_stem=doc_id)
+
+    return {
         "document_id": doc_id,
-        "definition_id": def_id,
-        "document_type": definition.get("document", {}).get("document_type", ""),
-        "document_description": definition.get("document", {}).get("document_description", ""),
-        "fields": fields,
-        "page_dimensions": text_data["page_dimensions"],
+        "definition_id": definition_id,
+        "tables": tables,
     }
-    # Surface a failure from the Docling pipeline so the frontend can tell
-    # "no matches because nothing matched" apart from "no matches because
-    # extraction errored". The fields list is still returned (empty matches)
-    # so the UI can render its empty state coherently.
-    if text_data.get("extraction_error"):
-        response["extraction_error"] = text_data["extraction_error"]
-    return response
+
+
+# ── Batch extraction ────────────────────────────────────────────────────
+
+
+class BatchExtractBody(BaseModel):
+    """Body for the batch-extract endpoint.
+
+    `document_ids` is bounded so a misconfigured client can't enqueue
+    thousands of documents in a single request — the cap is also enforced
+    in the route handler so the error message can name the actual limit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    document_ids: List[str] = Field(min_length=1)
+    definition_id: str = Field(min_length=1)
+
+
+def _sweep_old_batch_jobs() -> None:
+    """Drop completed jobs older than the TTL. Cheap: O(N) scan of a dict
+    that should stay short in practice. Called under _batch_jobs_lock."""
+    cutoff = time.time() - _BATCH_JOB_TTL_SECONDS
+    stale = [
+        jid
+        for jid, j in _batch_jobs.items()
+        if j.get("completed_at") and j["completed_at"] < cutoff
+    ]
+    for jid in stale:
+        _batch_jobs.pop(jid, None)
+
+
+def _public_batch_view(job: dict) -> dict:
+    """Job state minus internals (cancel event, raw definition) for the API.
+
+    SHALLOW-COPIES the per-doc dicts. The worker mutates `results`/`errors`
+    in place; if we returned the live references, FastAPI's JSON encoder
+    would iterate them after this function releases the jobs lock and
+    could race the worker mid-iteration ("dictionary changed size during
+    iteration"). The copies are immediate so the encoder sees a stable
+    snapshot."""
+    return {
+        "job_id": job["id"],
+        "definition_id": job["definition_id"],
+        "status": job["status"],
+        "total": job["total"],
+        "completed": job["completed"],
+        "results": dict(job["results"]),
+        "errors": dict(job["errors"]),
+        "started_at": job["started_at"],
+        "completed_at": job["completed_at"],
+    }
+
+
+def _run_batch_job(job: dict) -> None:
+    """Worker that walks the document list sequentially, honoring the
+    global extract semaphore + the in-flight tracker so a SIGTERM during
+    a batch is bounded by SCHEMABUILDER_SHUTDOWN_GRACE just like a single
+    /extract call.
+    """
+    job_id = job["id"]
+    cancelled: threading.Event = job["_cancelled"]
+    definition_id = job["definition_id"]
+    logger.info("Batch %s starting (%d docs)", job_id, job["total"])
+
+    for doc_id in job["document_ids"]:
+        if cancelled.is_set():
+            break
+        try:
+            filepath = _find_file(doc_id)
+            if not filepath:
+                raise ValueError("Document not found")
+
+            # blocking=True (not the 503-fast-fail pattern /extract uses):
+            # batch workers should queue behind interactive extracts rather
+            # than abandon the whole job.
+            _extract_semaphore.acquire()
+            try:
+                with _track_inflight():
+                    if cancelled.is_set():
+                        break
+                    text_data = _get_or_extract_text(filepath)
+                    defs = _load_definitions()
+                    definition = defs.get(definition_id)
+                    if not definition:
+                        raise ValueError("Definition no longer exists")
+                    fields = _extract_fields(
+                        definition, text_data["text_entries"], def_id=definition_id
+                    )
+                    _metrics_inc("extractions_completed")
+            finally:
+                _extract_semaphore.release()
+
+            with _batch_jobs_lock:
+                job["results"][doc_id] = {
+                    "document_id": doc_id,
+                    "fields": fields,
+                }
+        except Exception as e:  # noqa: BLE001 — surface every per-doc failure
+            logger.exception("Batch %s: %s failed", job_id, doc_id)
+            with _batch_jobs_lock:
+                job["errors"][doc_id] = str(e)
+        finally:
+            with _batch_jobs_lock:
+                job["completed"] += 1
+
+    with _batch_jobs_lock:
+        if job["status"] == "running":
+            job["status"] = "cancelled" if cancelled.is_set() else "done"
+        job["completed_at"] = time.time()
+    logger.info(
+        "Batch %s %s: %d completed, %d errors",
+        job_id, job["status"], job["completed"], len(job["errors"]),
+    )
+
+
+@app.post("/api/extract/batch")
+def start_batch_extract(body: BatchExtractBody):
+    """Kick off a batch extraction over `document_ids`.
+
+    Validates the definition exists up-front (404 if not) and that the doc
+    count is within the cap (413 if not). Otherwise spawns a worker and
+    returns the new `job_id` immediately so the client can poll
+    /api/extract/batch/{job_id} for progress.
+    """
+    if len(body.document_ids) > _BATCH_MAX_DOCS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Batch is bounded to {_BATCH_MAX_DOCS} documents per job.",
+        )
+    defs = _load_definitions()
+    if body.definition_id not in defs:
+        raise HTTPException(status_code=404, detail="Definition not found")
+
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id,
+        "definition_id": body.definition_id,
+        "document_ids": list(body.document_ids),
+        "status": "running",
+        "total": len(body.document_ids),
+        "completed": 0,
+        "results": {},
+        "errors": {},
+        "started_at": time.time(),
+        "completed_at": None,
+        "_cancelled": threading.Event(),
+    }
+    with _batch_jobs_lock:
+        _sweep_old_batch_jobs()
+        _batch_jobs[job_id] = job
+    _batch_pool.submit(_run_batch_job, job)
+    return {"job_id": job_id, "total": job["total"], "status": "running"}
+
+
+@app.get("/api/extract/batch/{job_id}")
+def get_batch_status(job_id: str):
+    """Current state of a batch job. Returns 404 once the TTL has elapsed.
+
+    Sweeps stale jobs on the read path too — without this, a deployment
+    that ran a batch then sat idle (no further `start_batch_extract`
+    calls) would hold every completed job's result dicts in memory
+    indefinitely. With sweep here, polling clients naturally trim the
+    table as old jobs age out."""
+    with _batch_jobs_lock:
+        _sweep_old_batch_jobs()
+        job = _batch_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Batch job not found")
+        return _public_batch_view(job)
+
+
+@app.delete("/api/extract/batch/{job_id}")
+def cancel_batch(job_id: str):
+    """Signal the batch worker to stop after its current document.
+
+    In-flight extractions aren't interrupted — Docling has no cancellation
+    hook — but no further documents will be enqueued. The job moves to
+    `cancelled` once the worker observes the flag.
+    """
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Batch job not found")
+        job["_cancelled"].set()
+        return {"job_id": job_id, "cancelling": True}
 
 
 if __name__ == "__main__":
