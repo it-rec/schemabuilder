@@ -866,6 +866,14 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
 _render_open_locks: dict = {}
 _render_open_locks_lock = threading.Lock()
 
+# Per-doc text-extraction locks. Two concurrent /extract requests for the same
+# uncached doc would otherwise both run the multi-second Docling pipeline only
+# for the second result to be discarded by the cache-merge check. The per-doc
+# lock serializes the slow work for one doc while different docs still extract
+# in parallel (Docling itself is serialized inside the converter anyway).
+_text_extract_locks: dict = {}
+_text_extract_locks_lock = threading.Lock()
+
 
 def _get_or_render(filepath: Path) -> dict:
     """Render-only path: opens the PDF and records dimensions. Page images are
@@ -955,40 +963,57 @@ def _get_or_extract_text(filepath: Path) -> dict:
             _metrics_inc("text_cache_hits")
             return cached
         _metrics_inc("text_cache_misses")
-    # Run extraction without holding the text lock so two different docs can
-    # be in flight concurrently. Each Docling call is still serialized inside
-    # the converter itself.
-    try:
-        text_entries, docling_dims = _extract_text(filepath)
-    except Exception as exc:
-        _metrics_inc("text_extraction_errors")
-        logger.exception("Text extraction failed for %s", filepath.name)
-        return {
-            "text_entries": [],
-            "page_dimensions": {},
+
+    # Serialize extraction for the same doc so two simultaneous /extract
+    # requests don't both pay the multi-second Docling cost only for one
+    # result to be discarded by the cache-merge check below. Different docs
+    # are still extracted in parallel via their own per-doc locks.
+    with _text_extract_locks_lock:
+        per_doc = _text_extract_locks.setdefault(doc_id, threading.Lock())
+
+    with per_doc:
+        # Re-check the cache under the per-doc lock: another caller for the
+        # same doc may have just populated it while we were waiting.
+        with _text_lock:
+            cached = _lru_get(_text_cache, doc_id)
+            if cached is not None and cached.get("_sig") == sig:
+                _metrics_inc("text_cache_hits")
+                return cached
+        # Run extraction without holding the global text lock so two different
+        # docs can be in flight concurrently. Each Docling call is still
+        # serialized inside the converter itself.
+        try:
+            text_entries, docling_dims = _extract_text(filepath)
+        except Exception as exc:
+            _metrics_inc("text_extraction_errors")
+            logger.exception("Text extraction failed for %s", filepath.name)
+            return {
+                "text_entries": [],
+                "page_dimensions": {},
+                "_sig": sig,
+                "extraction_error": f"{type(exc).__name__}: {exc}"[:300],
+            }
+        # Pre-lower text once at extraction time so the per-/extract matcher
+        # loop doesn't recompute it for every (entry × field) pair.
+        # Re-extraction on a cache miss is rare; per-extract calls are common,
+        # so amortize here.
+        for e in text_entries:
+            text = e.get("text", "")
+            e["_text_lower"] = text.lower()
+            e["_text_stripped_lower"] = text.strip().lower()
+        entry = {
+            "text_entries": text_entries,
+            "page_dimensions": docling_dims,
             "_sig": sig,
-            "extraction_error": f"{type(exc).__name__}: {exc}"[:300],
         }
-    # Pre-lower text once at extraction time so the per-/extract matcher loop
-    # doesn't recompute it for every (entry × field) pair. Re-extraction on a
-    # cache miss is rare; per-extract calls are common, so amortize here.
-    for e in text_entries:
-        text = e.get("text", "")
-        e["_text_lower"] = text.lower()
-        e["_text_stripped_lower"] = text.strip().lower()
-    entry = {
-        "text_entries": text_entries,
-        "page_dimensions": docling_dims,
-        "_sig": sig,
-    }
-    with _text_lock:
-        # Another caller may have populated the cache while we were extracting;
-        # prefer the freshest result for the current signature.
-        existing = _lru_get(_text_cache, doc_id)
-        if existing is not None and existing.get("_sig") == sig:
-            return existing
-        _lru_set(_text_cache, doc_id, entry, _TEXT_CACHE_MAX)
-        return entry
+        with _text_lock:
+            # Another caller may have populated the cache while we were
+            # extracting; prefer the freshest result for the current signature.
+            existing = _lru_get(_text_cache, doc_id)
+            if existing is not None and existing.get("_sig") == sig:
+                return existing
+            _lru_set(_text_cache, doc_id, entry, _TEXT_CACHE_MAX)
+            return entry
 
 
 def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
@@ -1019,10 +1044,18 @@ def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
                     _render_page(filepath, 2)
             except Exception:
                 logger.exception("Prefetch page-2 render failed for %s", filepath.name)
-            try:
-                _get_or_extract_text(filepath)
-            except Exception:
-                logger.exception("Prefetch text extraction failed for %s", filepath.name)
+            # Respect the global extraction cap: prefetch warm-up runs the
+            # same Docling pipeline as /extract, so unconditionally firing it
+            # would double the effective concurrency vs. _MAX_CONCURRENT_EXTRACTS.
+            # Skip the warm-up (the real /extract call will run extraction
+            # lazily) rather than queue up and starve foreground requests.
+            if _extract_semaphore.acquire(blocking=False):
+                try:
+                    _get_or_extract_text(filepath)
+                except Exception:
+                    logger.exception("Prefetch text extraction failed for %s", filepath.name)
+                finally:
+                    _extract_semaphore.release()
         finally:
             with _prefetch_inflight_lock:
                 _prefetch_inflight.discard(doc_id)
@@ -1088,8 +1121,13 @@ def _load_definitions() -> dict:
         DEFINITIONS_DIR.mkdir(parents=True, exist_ok=True)
 
     sig = _definitions_dir_signature()
+    # Read the signature first, then the cache. The writer sets cache *before*
+    # signature under _definitions_lock, so this read order means a torn read
+    # can only miss the fast path (and fall through to the lock) — never
+    # return the old cache while believing it matches the new signature.
+    cached_sig = _definitions_signature
     cached = _definitions_cache
-    if cached is not None and _definitions_signature == sig:
+    if cached is not None and cached_sig == sig:
         return cached
 
     with _definitions_lock:

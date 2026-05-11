@@ -72,6 +72,12 @@ async function request(path, {
   errorFallback = `Request to ${path} failed`,
 } = {}) {
   const isIdempotent = method === "GET" || method === "HEAD";
+  // A caller can opt non-idempotent methods into retries by passing `retries`
+  // explicitly — e.g. /extract POSTs that want to absorb a 503 from the
+  // server-side concurrency limiter. Without an explicit value, only
+  // idempotent verbs retry by default.
+  const retriesExplicit = retries !== undefined;
+  const canRetry = isIdempotent || retriesExplicit;
   const attempts = (retries ?? (isIdempotent ? DEFAULT_RETRIES : 0)) + 1;
 
   let lastError;
@@ -91,8 +97,9 @@ async function request(path, {
       // AbortError but we surface it as a retryable network error below.
       if (signal && signal.aborted) throw err;
       lastError = err;
-      // Retry network errors (incl. our own timeout) on idempotent requests.
-      if (isIdempotent && attempt < attempts - 1) {
+      // Retry network errors (incl. our own timeout) on idempotent requests,
+      // or when the caller explicitly opted in via `retries`.
+      if (canRetry && attempt < attempts - 1) {
         await new Promise((r) => setTimeout(r, RETRY_BASE_MS * 2 ** attempt));
         continue;
       }
@@ -103,7 +110,7 @@ async function request(path, {
     // Retry transient server errors (5xx) and 503 specifically. 429 is also
     // worth a retry but with the Retry-After header honored if present.
     if (res.status >= 500 || res.status === 429) {
-      if (isIdempotent && attempt < attempts - 1) {
+      if (canRetry && attempt < attempts - 1) {
         const ra = Number(res.headers.get("retry-after"));
         const wait = Number.isFinite(ra) && ra > 0
           ? ra * 1000
