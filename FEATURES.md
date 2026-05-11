@@ -109,3 +109,8 @@ Status: ideas captured 2026-05-11. Shipped on branch
   GET .../versions/{id} returns the full content; the editor gains
   a History modal with a side-by-side recursive-sorted-JSON diff
   and a Restore-this-version button that PATCHes back)
+- #14 OpenAPI snapshot drift check (`backend/openapi-snapshot.json`
+  committed; `export_openapi.py` regenerates it; a pytest case + a
+  dedicated CI step diff the live schema against the snapshot and
+  fail with a clear "run python export_openapi.py SNAPSHOT" message
+  on drift)

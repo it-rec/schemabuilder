@@ -68,6 +68,24 @@ ruff check .                      # MUST be clean — CI gate is hard
 mypy --ignore-missing-imports --no-strict-optional main.py   # advisory in CI
 ```
 
+### OpenAPI snapshot
+
+`openapi-snapshot.json` is committed and CI fails the build (and pytest
+fails `test_openapi_snapshot_is_up_to_date`) if it drifts. Anything that
+adds/removes a route, renames a path param, or changes a Pydantic model
+schema requires regenerating it:
+
+```bash
+cd backend
+python export_openapi.py SNAPSHOT   # writes openapi-snapshot.json
+git add openapi-snapshot.json
+```
+
+Then commit alongside the API change. A frontend-only change is rare to
+trigger this — but if `services/api.js` adds a call to an endpoint the
+backend doesn't yet have, that's a separate kind of drift the snapshot
+won't catch.
+
 Ruff config (`backend/pyproject.toml`):
 - target: `py311` (not 3.14 — don't use match-statement features, `Self`
   imports from `typing`, etc.)

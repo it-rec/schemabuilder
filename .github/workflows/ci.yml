@@ -32,6 +32,17 @@ jobs:
         # Non-strict for now; the goal is to catch obvious regressions
         # without forcing every function to be annotated up front.
         run: mypy --ignore-missing-imports --no-strict-optional main.py || true
+      - name: OpenAPI snapshot drift check
+        # Regenerate the schema and diff against the committed snapshot.
+        # A non-empty diff fails the build with a clear message. The same
+        # check runs as a pytest case (test_openapi_snapshot_is_up_to_date)
+        # so locally a developer sees the failure on `pytest` too; this
+        # standalone step exists so CI surfaces the failure even if other
+        # tests are broken.
+        run: |
+          python export_openapi.py > /tmp/openapi-live.json
+          diff -u openapi-snapshot.json /tmp/openapi-live.json \
+            || (echo "::error::OpenAPI snapshot is stale. Run: cd backend && python export_openapi.py SNAPSHOT"; exit 1)
       - name: Pytest
         run: pytest tests/ -q
 
