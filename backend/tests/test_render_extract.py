@@ -936,6 +936,72 @@ def test_import_docling_symbols_walks_submodules_as_last_resort(monkeypatch):
         main._docling_walk_cache.clear()
 
 
+def test_import_docling_symbols_diagnoses_metapackage_only_install(
+    monkeypatch, tmp_path
+):
+    """Repro the Windows failure mode where `docling` is on disk as just the
+    empty metapackage shim (since 2.20 the real code ships in `docling-slim`)
+    and `docling/datamodel/pipeline_options.py` is missing. The error must
+    tell the operator *how to repair the install* rather than dumping yet
+    another generic ModuleNotFoundError that's been "fixed" three times.
+    """
+    pkg = tmp_path / "docling"
+    (pkg / "datamodel").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "datamodel" / "__init__.py").write_text("")
+    # NOTE: deliberately no pipeline_options.py — this is the broken state.
+
+    for name in list(sys.modules):
+        if name == "docling" or name.startswith("docling."):
+            sys.modules.pop(name, None)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    main._docling_walk_cache.clear()
+
+    try:
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            main._import_docling_symbols(
+                main._PDF_PIPELINE_OPTIONS_PATHS, ("PdfPipelineOptions",)
+            )
+    finally:
+        for name in list(sys.modules):
+            if name == "docling" or name.startswith("docling."):
+                sys.modules.pop(name, None)
+        main._docling_walk_cache.clear()
+
+    msg = str(excinfo.value)
+    # The whole point of the diagnostic: an actionable repair command.
+    assert "docling-slim" in msg, msg
+    assert "force-reinstall" in msg, msg
+
+
+def test_diagnose_docling_install_passes_when_pipeline_options_present(
+    monkeypatch, tmp_path
+):
+    """The diagnostic must stay silent (return None) for a healthy install,
+    otherwise we'd attach a misleading "your install is broken" hint to
+    unrelated import failures.
+    """
+    pkg = tmp_path / "docling"
+    (pkg / "datamodel").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "datamodel" / "__init__.py").write_text("")
+    (pkg / "datamodel" / "pipeline_options.py").write_text(
+        "class PdfPipelineOptions:\n    pass\n"
+    )
+
+    for name in list(sys.modules):
+        if name == "docling" or name.startswith("docling."):
+            sys.modules.pop(name, None)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    try:
+        assert main._diagnose_docling_install() is None
+    finally:
+        for name in list(sys.modules):
+            if name == "docling" or name.startswith("docling."):
+                sys.modules.pop(name, None)
+
+
 def test_format_import_error_walks_cause_chain():
     """The chain formatter must surface the deepest cause in the rendered
     string, because that's the one the user can act on (e.g. `pip install

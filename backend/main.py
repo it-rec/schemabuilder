@@ -633,6 +633,52 @@ def _resolve_accelerator_device(AcceleratorDevice):
     return getattr(AcceleratorDevice, "AUTO", AcceleratorDevice.CPU)
 
 
+def _diagnose_docling_install() -> str | None:
+    """Detect the 'metapackage-only' broken state and return a fix hint.
+
+    Since docling 2.20 the `docling` PyPI distribution is just a metapackage
+    that depends on `docling-slim[standard]`; the actual modules ship inside
+    `docling-slim`. If `docling-slim` is missing or its install was interrupted
+    after pip uninstalled an older `docling`, the result is a namespace where
+    `import docling.datamodel` succeeds but `docling/datamodel/pipeline_options.py`
+    doesn't exist on disk — and no amount of import-path fallback can paper
+    over that. Detect it explicitly so the warm-up error tells the user how
+    to repair their env instead of leaking yet another `ModuleNotFoundError`.
+
+    Returns an actionable English sentence, or None if docling looks healthy
+    (or isn't installed at all — let the regular error path handle that).
+    """
+    try:
+        root = importlib.import_module("docling")
+    except ImportError:
+        return None
+    root_paths = list(getattr(root, "__path__", []) or [])
+    if not root_paths:
+        return (
+            "The 'docling' package is installed but has no module search path "
+            "(empty namespace). Reinstall the slim distribution that ships the "
+            "actual code: pip install --force-reinstall 'docling-slim[standard]'"
+        )
+    # `docling/datamodel/pipeline_options.py` has been the canonical home of
+    # PdfPipelineOptions since docling 2.x. If it isn't on disk anywhere on
+    # the package's __path__, docling-slim is not properly installed.
+    for base in root_paths:
+        if (Path(base) / "datamodel" / "pipeline_options.py").is_file():
+            return None
+    # Also accept the older flat layout, just in case some future release
+    # restores it.
+    for base in root_paths:
+        if (Path(base) / "pipeline_options.py").is_file():
+            return None
+    return (
+        "Your docling install is incomplete: docling/datamodel/pipeline_options.py "
+        "is not present on disk. Since docling 2.20 the 'docling' wheel is just "
+        "a metapackage; the real code lives in 'docling-slim'. Repair with: "
+        "pip install --force-reinstall 'docling-slim[standard]' "
+        "(or reinstall the full pin from requirements.txt)."
+    )
+
+
 def _format_import_error(exc: BaseException) -> str:
     """Render an ImportError + its cause chain on a single line.
 
@@ -744,9 +790,11 @@ def _import_docling_symbols(paths: tuple[str, ...], names: tuple[str, ...]) -> t
             "; ".join(tried),
         )
         return tuple(getattr(found, n) for n in names)
+    hint = _diagnose_docling_install()
+    suffix = f" — {hint}" if hint else ""
     raise ModuleNotFoundError(
         "Could not locate docling symbols "
-        f"{names} in any of: {'; '.join(tried)}"
+        f"{names} in any of: {'; '.join(tried)}{suffix}"
     ) from last_err
 
 
