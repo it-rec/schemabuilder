@@ -59,5 +59,9 @@ group; each item lists the rationale and the smallest sensible scope.
 
 ---
 
-Status: ideas captured 2026-05-11. Item #1 is being implemented on
-branch `claude/suggest-project-features-HguxY`.
+Status: ideas captured 2026-05-11. Items #1 (Definition Editor) and
+#3 (Bounding-box overlay) shipped on branch
+`claude/suggest-project-features-HguxY`. #3 covered: persistent ghost
+overlays for every matched field on the current page, reverse hover
+linking overlays back to the field rows, and a label on the active
+overlay.

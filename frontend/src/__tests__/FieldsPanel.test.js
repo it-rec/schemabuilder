@@ -118,3 +118,29 @@ test("shows page badge for matched field", () => {
   );
   expect(screen.getByText("p.1")).toBeInTheDocument();
 });
+
+test("applies highlighted class to row matching highlightedField", () => {
+  render(
+    <FieldsPanel
+      extraction={mockExtraction}
+      onHoverField={() => {}}
+      highlightedField={mockExtraction.fields[0]}
+      loading={false}
+    />,
+  );
+  const row = screen.getByTestId("field-invoice_id");
+  expect(row).toHaveClass("fields-panel__field-header--highlighted");
+});
+
+test("no highlighted class when highlightedField is null", () => {
+  render(
+    <FieldsPanel
+      extraction={mockExtraction}
+      onHoverField={() => {}}
+      highlightedField={null}
+      loading={false}
+    />,
+  );
+  const row = screen.getByTestId("field-invoice_id");
+  expect(row).not.toHaveClass("fields-panel__field-header--highlighted");
+});

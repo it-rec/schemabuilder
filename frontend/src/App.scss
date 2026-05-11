@@ -356,6 +356,65 @@
   box-shadow: inset 3px 0 0 0 var(--cds-support-success, #24a148);
 }
 
+// Reverse highlight: when the user hovers an overlay on the rendered page,
+// the corresponding field row in the panel lights up.
+.fields-panel__field-header--highlighted {
+  background: var(--cds-layer-hover-01, #e8e8e8) !important;
+  border-color: var(--cds-border-interactive, #0f62fe) !important;
+}
+
+.fields-panel__sub-field--highlighted {
+  background: var(--cds-layer-hover-01, #e8e8e8) !important;
+  border-color: var(--cds-border-interactive, #0f62fe) !important;
+}
+
+// Bounding-box overlays. Each matched field on the current page renders as a
+// low-opacity blue rectangle so users can see at-a-glance where every
+// extraction landed. The "active" variant (hovered field or hovered overlay)
+// gets a solid border and a label.
+.document-viewer__highlight {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  background: rgba(15, 98, 254, 0.08);
+  border: 1px solid rgba(15, 98, 254, 0.45);
+  border-radius: 2px;
+  cursor: pointer;
+  transition:
+    background-color motion.$duration-fast-02 motion.motion(standard, productive),
+    border-color motion.$duration-fast-02 motion.motion(standard, productive);
+
+  &:hover,
+  &:focus-visible {
+    background: rgba(15, 98, 254, 0.18);
+    border-color: #0f62fe;
+  }
+
+  &:focus-visible {
+    @include focus-ring;
+  }
+}
+
+.document-viewer__highlight--active {
+  background: rgba(15, 98, 254, 0.25);
+  border: 2px solid #0f62fe;
+}
+
+.document-viewer__highlight-label {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 2px;
+  padding: 2px spacing.$spacing-02;
+  background: #0f62fe;
+  color: #ffffff;
+  @include type.type-style("label-01");
+  text-transform: capitalize;
+  white-space: nowrap;
+  pointer-events: none;
+  border-radius: 2px;
+}
+
 .fields-panel__field-label-row {
   display: flex;
   align-items: center;

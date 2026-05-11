@@ -68,6 +68,7 @@ const SubFieldRow = React.memo(function SubFieldRow({
   index,
   subField,
   onHoverField,
+  highlighted,
 }) {
   const isMatched = subField.matched_entry_id != null;
   const handleEnter = useCallback(() => {
@@ -77,7 +78,10 @@ const SubFieldRow = React.memo(function SubFieldRow({
 
   return (
     <li
-      className="fields-panel__sub-field"
+      className={
+        "fields-panel__sub-field" +
+        (highlighted ? " fields-panel__sub-field--highlighted" : "")
+      }
       onMouseEnter={handleEnter}
       onMouseLeave={handleLeave}
       onFocus={handleEnter}
@@ -103,7 +107,11 @@ const SubFieldRow = React.memo(function SubFieldRow({
   );
 });
 
-const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
+const FieldItem = React.memo(function FieldItem({
+  field,
+  onHoverField,
+  highlightedEntryId,
+}) {
   const [expanded, setExpanded] = useState(false);
   const isArray = field.type === "array";
   const hasValue = field.extracted_value != null;
@@ -145,10 +153,24 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
       }
     : {};
 
+  const isSelfHighlighted =
+    highlightedEntryId != null && field.matched_entry_id === highlightedEntryId;
+  const hasHighlightedChild =
+    isArray &&
+    highlightedEntryId != null &&
+    field.items?.some((item) =>
+      item.fields?.some((sf) => sf.matched_entry_id === highlightedEntryId),
+    );
+  const isHighlighted = isSelfHighlighted || hasHighlightedChild;
+
   return (
     <li className="fields-panel__field">
       <div
-        className={`fields-panel__field-header ${hasValue || hasItems ? "fields-panel__field-header--matched" : ""}`}
+        className={
+          "fields-panel__field-header" +
+          (hasValue || hasItems ? " fields-panel__field-header--matched" : "") +
+          (isHighlighted ? " fields-panel__field-header--highlighted" : "")
+        }
         onMouseEnter={handleEnter}
         onMouseLeave={handleLeave}
         onFocus={handleEnter}
@@ -212,6 +234,10 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
                       index={idx}
                       subField={subField}
                       onHoverField={onHoverField}
+                      highlighted={
+                        highlightedEntryId != null &&
+                        subField.matched_entry_id === highlightedEntryId
+                      }
                     />
                   ))}
                 </ul>
@@ -229,9 +255,11 @@ const FieldItem = React.memo(function FieldItem({ field, onHoverField }) {
 export default function FieldsPanel({
   extraction,
   onHoverField,
+  highlightedField,
   loading,
 }) {
   const fields = extraction?.fields;
+  const highlightedEntryId = highlightedField?.matched_entry_id ?? null;
 
   const matchedCount = useMemo(() => {
     if (!fields) return 0;
@@ -306,6 +334,7 @@ export default function FieldsPanel({
             key={field.name}
             field={field}
             onHoverField={onHoverField}
+            highlightedEntryId={highlightedEntryId}
           />
         ))}
       </ul>

@@ -207,6 +207,46 @@ export default function App() {
     return documentData;
   }, [documentData, extraction]);
 
+  // Flat list of every matched field with a placeable bbox. Array fields
+  // collapse to one overlay per item (sub-fields of one row share the table-
+  // cell bbox, so per-sub-field overlays would visually stack). `field` is the
+  // payload sent back to onHoverField, so FieldsPanel can highlight the same
+  // row that DocumentViewer just lit up.
+  const extractedFields = useMemo(() => {
+    if (!extraction?.fields) return [];
+    const out = [];
+    for (const f of extraction.fields) {
+      if (f.matched_entry_id != null && f.bbox && f.page) {
+        out.push({
+          key: `field.${f.name}`,
+          label: f.name.replace(/_/g, " "),
+          matched_entry_id: f.matched_entry_id,
+          page: f.page,
+          bbox: f.bbox,
+          field: f,
+        });
+      }
+      if (f.type === "array" && Array.isArray(f.items)) {
+        f.items.forEach((item, idx) => {
+          const sub = item.fields?.find(
+            (sf) => sf.bbox && sf.page && sf.matched_entry_id != null,
+          );
+          if (sub) {
+            out.push({
+              key: `array.${f.name}.${idx}`,
+              label: `${f.name.replace(/_/g, " ")} #${idx + 1}`,
+              matched_entry_id: sub.matched_entry_id,
+              page: sub.page,
+              bbox: sub.bbox,
+              field: sub,
+            });
+          }
+        });
+      }
+    }
+    return out;
+  }, [extraction]);
+
   return (
     <Theme theme="g10">
       <Header aria-label="IBM Schema Builder">
@@ -270,6 +310,8 @@ export default function App() {
               docId={selectedDocId}
               documentData={viewerData}
               highlightedField={highlightedField}
+              onHoverField={handleHoverField}
+              extractedFields={extractedFields}
               loading={loading}
             />
           </main>
@@ -281,6 +323,7 @@ export default function App() {
             <FieldsPanel
               extraction={extraction}
               onHoverField={handleHoverField}
+              highlightedField={highlightedField}
               loading={loading || extracting}
             />
           </aside>
