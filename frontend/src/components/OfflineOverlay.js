@@ -8,8 +8,10 @@ import { WifiOff } from "@carbon/react/icons";
 //   false → confirmed offline → headline + retry button.
 // The polling loop in useConnectionStatus keeps retrying in the background
 // regardless of the button, so the overlay disappears the moment the
-// backend comes back even if the user never clicks.
-export default function OfflineOverlay({ online, retrying, onRetry }) {
+// backend comes back even if the user never clicks. A single, steady
+// InlineLoading conveys "we're working on it" without flipping between
+// in-flight / waiting states every few seconds.
+export default function OfflineOverlay({ online, onRetry }) {
   const isChecking = online === null;
   return (
     <div
@@ -33,17 +35,13 @@ export default function OfflineOverlay({ online, retrying, onRetry }) {
             : "Schema Builder can't reach its backend. The interface is paused and will resume automatically as soon as the connection is restored."}
         </p>
         <div className="offline-overlay__status">
-          {retrying ? (
-            <InlineLoading
-              description="Reconnecting…"
-              status="active"
-              data-testid="offline-overlay-loading"
-            />
-          ) : (
-            <span className="offline-overlay__status-text">
-              Waiting for the next attempt…
-            </span>
-          )}
+          <InlineLoading
+            description={
+              isChecking ? "Connecting…" : "Reconnecting automatically…"
+            }
+            status="active"
+            data-testid="offline-overlay-loading"
+          />
         </div>
         {!isChecking && (
           <div className="offline-overlay__actions">
@@ -51,7 +49,6 @@ export default function OfflineOverlay({ online, retrying, onRetry }) {
               kind="primary"
               size="md"
               onClick={onRetry}
-              disabled={retrying}
               data-testid="offline-overlay-retry"
             >
               Retry now

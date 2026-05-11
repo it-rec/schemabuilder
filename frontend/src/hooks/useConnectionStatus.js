@@ -9,22 +9,23 @@ const ONLINE_POLL_MS = 30000;
 
 // Tracks reachability of the backend's /health endpoint. Returns:
 //   online    – null while the first probe is in flight, then true / false.
-//   retrying  – true while a probe is in flight; drives the spinner in the
-//               offline overlay so the user sees we're actively reconnecting.
 //   reloadKey – monotonically increments on every transition into "online".
 //               Consumers put it in a useEffect dep list to force data loads
 //               to re-run once the connection comes back.
 //   retry     – fire an immediate probe (wired to the "Retry now" button).
 export function useConnectionStatus() {
   const [online, setOnline] = useState(null);
-  const [retrying, setRetrying] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   // Read inside the polling loop without re-creating the timer on every flip;
   // the effect that owns the loop runs once for the lifetime of the hook.
   const onlineRef = useRef(null);
+  // Coalesce overlapping probes: button mashing or an online-event arriving
+  // mid-poll shouldn't fan out into parallel /health requests.
+  const inFlightRef = useRef(false);
 
   const ping = useCallback(async () => {
-    setRetrying(true);
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       await checkHealth();
       if (onlineRef.current !== true) {
@@ -38,7 +39,7 @@ export function useConnectionStatus() {
       onlineRef.current = false;
       setOnline(false);
     } finally {
-      setRetrying(false);
+      inFlightRef.current = false;
     }
   }, []);
 
@@ -78,5 +79,5 @@ export function useConnectionStatus() {
     };
   }, [ping]);
 
-  return { online, retrying, reloadKey, retry: ping };
+  return { online, reloadKey, retry: ping };
 }

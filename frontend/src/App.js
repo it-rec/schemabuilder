@@ -38,7 +38,7 @@ export default function App() {
   // network-bound interaction can happen. `reloadKey` flips on each
   // null→true / false→true transition so the initial-load effect re-runs
   // and the panels repopulate with fresh data once the backend is back.
-  const { online, retrying, reloadKey, retry } = useConnectionStatus();
+  const { online, reloadKey, retry } = useConnectionStatus();
 
   const [documents, setDocuments] = useState([]);
   const [selectedDocId, setSelectedDocId] = useState(null);
@@ -615,7 +615,7 @@ export default function App() {
       )}
       </div>
       {offline && (
-        <OfflineOverlay online={online} retrying={retrying} onRetry={retry} />
+        <OfflineOverlay online={online} onRetry={retry} />
       )}
     </Theme>
   );
