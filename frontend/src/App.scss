@@ -19,9 +19,12 @@
   // Carbon's <Content> ships with `padding: 2rem` on all sides. The three
   // panes own their own internal padding (definition-selector, document-list,
   // fields-panel, etc.), so we zero the shell gutter and let the grid
-  // span edge-to-edge under the header.
-  padding: 3rem 0 0 0; // padding-top accounts for the Carbon header
-  height: 100vh;
+  // span edge-to-edge under the header. Carbon's UI Shell stylesheet
+  // already adds `margin-block-start: 3rem` to `.cds--content` whenever a
+  // sibling `.cds--header` exists, so we don't repeat that offset here —
+  // and the height subtracts the same 3rem to stay within the viewport.
+  padding: 0;
+  height: calc(100vh - 3rem);
   box-sizing: border-box;
   // Theme tokens flip with g10 ↔ g90, but the outer <body> stays at the
   // browser default. Force the app's surface to honor the active theme.
