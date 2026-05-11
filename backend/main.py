@@ -4,6 +4,7 @@ import atexit
 import contextvars
 import csv
 import hashlib
+import importlib
 import io
 import json
 import logging
@@ -811,6 +812,52 @@ def _resolve_ocr_decision(filepath: Path) -> bool:
 _warmup_done = threading.Event()
 
 
+_INPUT_FORMAT_IMPORT_PATHS = (
+    # Original location in 2.14+, still authoritative in 2.93.
+    "docling.datamodel.base_models",
+    # Some intermediate versions re-export from the datamodel package init.
+    "docling.datamodel",
+    # document_converter unconditionally re-imports InputFormat, so it's a
+    # reliable last-ditch path even on builds that don't re-export elsewhere.
+    "docling.document_converter",
+    # Top-level package occasionally re-exports it on the newest builds.
+    "docling",
+)
+
+
+def _resolve_pdf_input_format(converter=None):
+    """Locate the `InputFormat.PDF` enum value across docling layouts.
+
+    Docling moves `InputFormat` between submodules across releases (and
+    distributions: `docling` is a thin metapackage that pulls in
+    `docling-slim`, so a half-broken install can land with the metapackage
+    only and no `docling.datamodel.base_models`). Try the known import paths
+    in order; if every one fails, introspect the live converter's
+    `format_to_options` mapping — those keys are exactly the `InputFormat`
+    members docling itself uses internally, so we can pull `.PDF` out
+    without ever importing the enum.
+
+    Returns the PDF enum value, or `None` if no path resolves it.
+    """
+    for path in _INPUT_FORMAT_IMPORT_PATHS:
+        try:
+            module = importlib.import_module(path)
+        except ImportError:
+            continue
+        input_format = getattr(module, "InputFormat", None)
+        pdf = getattr(input_format, "PDF", None)
+        if pdf is not None:
+            return pdf
+
+    if converter is not None:
+        for fmt in getattr(converter, "format_to_options", {}) or {}:
+            name = getattr(fmt, "name", "") or ""
+            value = getattr(fmt, "value", "") or ""
+            if name.upper() == "PDF" or str(value).lower() == "pdf":
+                return fmt
+    return None
+
+
 def _warm_up_converter():
     """Background warm-up entrypoint; never raises.
 
@@ -824,21 +871,17 @@ def _warm_up_converter():
     request finds the models already resident on-device.
     """
     try:
-        # `InputFormat` moved between submodules across docling releases
-        # (base_models on 2.14, sometimes re-exported from docling.datamodel
-        # or the top-level package on newer builds). Try the known locations
-        # in turn so warm-up survives version drift.
-        try:
-            from docling.datamodel.base_models import InputFormat
-        except ImportError:
-            try:
-                from docling.datamodel import InputFormat  # type: ignore
-            except ImportError:
-                from docling import InputFormat  # type: ignore
-
         cv = _get_text_converter(do_ocr=False)
+        pdf_format = _resolve_pdf_input_format(cv)
+        if pdf_format is None:
+            logger.warning(
+                "Docling InputFormat.PDF could not be located in this install; "
+                "skipping pipeline warm-up. Lazy init on first /extract will "
+                "still work."
+            )
+            return
         t0 = time.perf_counter()
-        cv.initialize_pipeline(InputFormat.PDF)
+        cv.initialize_pipeline(pdf_format)
         logger.info(
             "Docling pipeline pre-loaded in %.2fs (PDF, no-OCR)",
             time.perf_counter() - t0,

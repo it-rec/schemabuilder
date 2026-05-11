@@ -333,13 +333,15 @@ class _FakeConverter:
         self._doc = doc
         self.convert_calls = 0
         self.init_calls = 0
+        self.last_init_fmt = None
 
     def convert(self, _path):
         self.convert_calls += 1
         return _FakeConvertResult(self._doc)
 
-    def initialize_pipeline(self, _fmt):
+    def initialize_pipeline(self, fmt):
         self.init_calls += 1
+        self.last_init_fmt = fmt
 
 
 def test_extract_text_returns_entries_and_dims(monkeypatch, tmp_path):
@@ -530,21 +532,35 @@ def test_get_text_converter_caches_per_ocr_flag(monkeypatch):
 # ── _warm_up_converter (graceful failure) ───────────────────────────────
 
 
+def _install_fake_input_format(monkeypatch, *, where="docling.datamodel.base_models",
+                                pdf="PDF"):
+    """Drop a fake docling module tree exposing `InputFormat.PDF` at `where`.
+
+    Forces the other known import paths to miss so the resolver has to walk
+    the fallback list and land on the requested location.
+    """
+    fake_pdf = types.SimpleNamespace(PDF=pdf)
+    fake_module = types.SimpleNamespace(InputFormat=fake_pdf)
+    for path in main._INPUT_FORMAT_IMPORT_PATHS:
+        if path == where:
+            monkeypatch.setitem(sys.modules, path, fake_module)
+        else:
+            # Module exists but doesn't expose InputFormat — must skip past it.
+            monkeypatch.setitem(sys.modules, path, types.SimpleNamespace())
+    return pdf
+
+
 def test_warm_up_converter_sets_ready_even_on_failure(monkeypatch):
     """If pipeline init throws, _warmup_done must still be set so /ready
     unblocks and the lazy path retries later."""
     main._warmup_done.clear()
     main._text_converters.clear()
 
-    # The function imports `docling.datamodel.base_models` at runtime; install
-    # a fake module so the import resolves.
-    fake_base = types.SimpleNamespace(InputFormat=types.SimpleNamespace(PDF="PDF"))
-    monkeypatch.setitem(sys.modules, "docling", types.SimpleNamespace(datamodel=None))
-    monkeypatch.setitem(sys.modules, "docling.datamodel",
-                        types.SimpleNamespace(base_models=fake_base))
-    monkeypatch.setitem(sys.modules, "docling.datamodel.base_models", fake_base)
+    _install_fake_input_format(monkeypatch)
 
     class _BoomConverter:
+        format_to_options: dict = {}
+
         def initialize_pipeline(self, _fmt):
             raise RuntimeError("simulated init failure")
 
@@ -560,13 +576,77 @@ def test_warm_up_converter_calls_initialize_pipeline(monkeypatch):
     main._warmup_done.clear()
     main._text_converters.clear()
 
-    fake_base = types.SimpleNamespace(InputFormat=types.SimpleNamespace(PDF="PDF"))
-    monkeypatch.setitem(sys.modules, "docling.datamodel.base_models", fake_base)
+    pdf_marker = _install_fake_input_format(monkeypatch)
 
     cv = _FakeConverter(doc=_FakeDoclingDoc([], {}))
+    cv.format_to_options = {}
     monkeypatch.setattr(main, "_get_text_converter", lambda do_ocr: cv)
     main._warm_up_converter()
     assert cv.init_calls == 1
+    assert cv.last_init_fmt == pdf_marker
+    assert main._warmup_done.is_set()
+
+
+# ── _resolve_pdf_input_format (cross-version fallbacks) ─────────────────
+
+
+def test_resolve_pdf_input_format_uses_document_converter_when_datamodel_broken(
+    monkeypatch,
+):
+    """Mirrors the user-reported failure: docling.datamodel.base_models is
+    missing entirely (broken half-install). Resolver must still locate
+    InputFormat via docling.document_converter, which re-imports it."""
+    pdf_marker = _install_fake_input_format(
+        monkeypatch, where="docling.document_converter", pdf="PDF-FROM-DC"
+    )
+    assert main._resolve_pdf_input_format(converter=None) == pdf_marker
+
+
+def test_resolve_pdf_input_format_introspects_converter_when_all_imports_fail(
+    monkeypatch,
+):
+    """If every known import path fails to expose InputFormat, the resolver
+    pulls the PDF enum out of the live converter's `format_to_options`
+    mapping — same value docling uses internally, no import required."""
+    for path in main._INPUT_FORMAT_IMPORT_PATHS:
+        monkeypatch.setitem(sys.modules, path, types.SimpleNamespace())
+
+    class _Fmt:
+        def __init__(self, name, value):
+            self.name = name
+            self.value = value
+
+    pdf_fmt = _Fmt("PDF", "pdf")
+    cv = types.SimpleNamespace(
+        format_to_options={_Fmt("DOCX", "docx"): object(), pdf_fmt: object()}
+    )
+    assert main._resolve_pdf_input_format(cv) is pdf_fmt
+
+
+def test_resolve_pdf_input_format_returns_none_when_unresolvable(monkeypatch):
+    """No import path works AND the converter has no format mapping. The
+    resolver must return None so warm-up logs a warning and bails out
+    instead of raising."""
+    for path in main._INPUT_FORMAT_IMPORT_PATHS:
+        monkeypatch.setitem(sys.modules, path, types.SimpleNamespace())
+    cv = types.SimpleNamespace(format_to_options={})
+    assert main._resolve_pdf_input_format(cv) is None
+
+
+def test_warm_up_skips_init_when_input_format_unresolvable(monkeypatch):
+    """When InputFormat can't be located by any path, warm-up must NOT call
+    initialize_pipeline (we have nothing valid to pass) and must still set
+    _warmup_done so /ready unblocks."""
+    main._warmup_done.clear()
+    main._text_converters.clear()
+
+    cv = _FakeConverter(doc=_FakeDoclingDoc([], {}))
+    cv.format_to_options = {}
+    monkeypatch.setattr(main, "_get_text_converter", lambda do_ocr: cv)
+    monkeypatch.setattr(main, "_resolve_pdf_input_format", lambda _cv: None)
+
+    main._warm_up_converter()
+    assert cv.init_calls == 0
     assert main._warmup_done.is_set()
 
 
