@@ -25,6 +25,75 @@
   color: var(--cds-text-primary, #161616);
 }
 
+// Offline overlay. Full-viewport scrim with a centered notification card.
+// Carbon doesn't ship a first-class "page-level disconnected" pattern, so we
+// compose `overlay` (the modal backdrop token) with a Tile-shaped card that
+// uses Carbon's notification surface tokens — visually consistent with the
+// existing InlineNotification widgets in the editor / teacher modals.
+.offline-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000; // above Carbon's Modal z-index (8000) so it wins
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: spacing.$spacing-05;
+  background: var(--cds-overlay, rgba(22, 22, 22, 0.5));
+}
+
+.offline-overlay__card {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-05;
+  width: 100%;
+  max-width: 28rem;
+  padding: spacing.$spacing-07 spacing.$spacing-06;
+  background: var(--cds-layer-01, #f4f4f4);
+  color: var(--cds-text-primary, #161616);
+  border-left: 3px solid var(--cds-support-warning, #f1c21b);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+}
+
+.offline-overlay__icon {
+  color: var(--cds-support-warning, #f1c21b);
+}
+
+.offline-overlay__title {
+  @include type.type-style("heading-03");
+  margin: 0;
+  color: var(--cds-text-primary, #161616);
+}
+
+.offline-overlay__body {
+  @include type.type-style("body-01");
+  margin: 0;
+  color: var(--cds-text-secondary, #525252);
+}
+
+.offline-overlay__status {
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+}
+
+.offline-overlay__status-text {
+  @include type.type-style("label-01");
+  color: var(--cds-text-secondary, #525252);
+}
+
+.offline-overlay__actions {
+  display: flex;
+  gap: spacing.$spacing-03;
+  justify-content: flex-end;
+}
+
+// Visual cue that the layout is paused while the overlay is up. `inert`
+// already blocks pointer / keyboard / AT focus; the dim + saturation drop is
+// purely cosmetic feedback so the page doesn't look broken behind the scrim.
+.app-shell[inert] {
+  filter: grayscale(0.4);
+}
+
 .app-layout {
   display: grid;
   grid-template-columns: 280px 1fr 360px;

@@ -128,6 +128,19 @@ async function request(path, {
   throw lastError || new Error(errorFallback);
 }
 
+// Liveness probe used by the connection-status hook. Short timeout and no
+// retries so a flat-line backend is reported as offline within seconds rather
+// than minutes. Throws on any network error or non-2xx status.
+export async function checkHealth({ signal, timeoutMs = 4000 } = {}) {
+  const res = await request("/health", {
+    signal,
+    timeoutMs,
+    retries: 0,
+    errorFallback: "Health check failed",
+  });
+  return res.json();
+}
+
 // Multipart body — pass no Content-Type so fetch sets the boundary itself.
 // 120s timeout matches /extract; large PDFs need the headroom.
 export async function uploadDocument(file, { signal } = {}) {
