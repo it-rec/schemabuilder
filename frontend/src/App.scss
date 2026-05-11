@@ -91,6 +91,14 @@
 // purely cosmetic feedback so the page doesn't look broken behind the scrim.
 .app-shell[inert] {
   filter: grayscale(0.4);
+
+  // Drop the header-clearing padding while the overlay covers the viewport.
+  // The padding is only there so content doesn't slide under the fixed
+  // Carbon header; with the scrim up nothing behind it is interactive, and
+  // the empty padding strip otherwise reads as a dark bar under the header.
+  .app-content {
+    padding-top: 0;
+  }
 }
 
 .app-layout {
