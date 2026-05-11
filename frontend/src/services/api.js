@@ -213,3 +213,41 @@ export async function deleteDefinition(defId, { signal } = {}) {
   return res.json();
 }
 
+// Run extraction + target_tables transforms and return all rows as JSON.
+// CSV download is a separate function because it returns a blob, not JSON,
+// and needs a longer timeout for the cold-Docling case (mirrors /extract).
+export async function exportTablesJson(docId, definitionId, { signal } = {}) {
+  const qs = new URLSearchParams({ definition_id: definitionId });
+  const res = await request(`/api/documents/${docId}/export?${qs}`, {
+    signal,
+    timeoutMs: 120_000,
+    retries: 1,
+    errorFallback: "Failed to export tables",
+  });
+  return res.json();
+}
+
+// Download a single target table as a CSV blob. Returns `{ blob, filename }`
+// so the caller can hand the blob to URL.createObjectURL and use the server-
+// supplied Content-Disposition filename for the <a download> attribute.
+export async function exportTableCsv(docId, definitionId, table, { signal } = {}) {
+  const qs = new URLSearchParams({
+    definition_id: definitionId,
+    format: "csv",
+    table,
+  });
+  const res = await request(`/api/documents/${docId}/export?${qs}`, {
+    signal,
+    timeoutMs: 120_000,
+    retries: 1,
+    errorFallback: "Failed to export CSV",
+  });
+  // Parse the filename out of Content-Disposition; fall back to a generic
+  // name so the download is still usable if the header is missing.
+  const cd = res.headers.get("content-disposition") || "";
+  const m = /filename="([^"]+)"/.exec(cd);
+  const filename = m ? m[1] : `${docId}-${table}.csv`;
+  const blob = await res.blob();
+  return { blob, filename };
+}
+

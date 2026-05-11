@@ -59,9 +59,11 @@ group; each item lists the rationale and the smallest sensible scope.
 
 ---
 
-Status: ideas captured 2026-05-11. Items #1 (Definition Editor) and
-#3 (Bounding-box overlay) shipped on branch
-`claude/suggest-project-features-HguxY`. #3 covered: persistent ghost
-overlays for every matched field on the current page, reverse hover
-linking overlays back to the field rows, and a label on the active
-overlay.
+Status: ideas captured 2026-05-11. Items #1 (Definition Editor),
+#3 (Bounding-box overlay) and #4 (Target-table export) shipped on
+branch `claude/suggest-project-features-HguxY`. #4 added a transform
+engine (`backend/transforms.py`) with built-in `identity`,
+`string_to_date`, `string_to_currency`; a
+`GET /api/documents/{id}/export` endpoint behind the same semaphore
+as `/extract`; and an OverflowMenu in `FieldsPanel` offering JSON
+(all tables) or per-table CSV downloads.

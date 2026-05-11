@@ -17,6 +17,8 @@ import {
   fetchDocument,
   fetchDefinitions,
   extractFields,
+  exportTablesJson,
+  exportTableCsv,
   getPageImageUrl,
 } from "./services/api";
 import "./App.scss";
@@ -178,6 +180,46 @@ export default function App() {
     [refreshDefinitions],
   );
 
+  // Trigger a browser download for an exported table or the full JSON. We
+  // resolve to a Blob (or a stringified JSON object) and synthesize an
+  // anchor click so the user gets the standard "save as" UX without us
+  // navigating the page. Errors are surfaced via console.error rather than
+  // a toast for now — the FieldsPanel doesn't (yet) own user-facing
+  // notifications.
+  const handleExport = useCallback(
+    async ({ format, table }) => {
+      if (!selectedDocId || !selectedDefId) return;
+      try {
+        let blob, filename;
+        if (format === "csv") {
+          ({ blob, filename } = await exportTableCsv(
+            selectedDocId,
+            selectedDefId,
+            table,
+          ));
+        } else {
+          const payload = await exportTablesJson(selectedDocId, selectedDefId);
+          blob = new Blob([JSON.stringify(payload, null, 2)], {
+            type: "application/json",
+          });
+          filename = `${selectedDocId}-${selectedDefId}.json`;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Revoke on the next tick so the click has time to dispatch.
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      } catch (err) {
+        console.error(err);
+      }
+    },
+    [selectedDocId, selectedDefId],
+  );
+
   const handleEditorDeleted = useCallback(
     async (deletedId) => {
       const defs = await refreshDefinitions();
@@ -323,6 +365,7 @@ export default function App() {
             <FieldsPanel
               extraction={extraction}
               onHoverField={handleHoverField}
+              onExport={handleExport}
               highlightedField={highlightedField}
               loading={loading || extracting}
             />

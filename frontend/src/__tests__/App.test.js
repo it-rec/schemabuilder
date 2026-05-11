@@ -1,5 +1,5 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "../App";
 import * as api from "../services/api";
 
@@ -83,4 +83,27 @@ test("loads definitions and triggers extraction", async () => {
 test("displays definition selector", async () => {
   render(<App />);
   expect(await screen.findByText("Document class")).toBeInTheDocument();
+});
+
+test("export menu triggers JSON download via api.exportTablesJson", async () => {
+  api.extractFields.mockResolvedValue({
+    ...mockExtraction,
+    target_tables: ["Invoice"],
+  });
+  api.exportTablesJson = jest.fn().mockResolvedValue({
+    document_id: "abc123",
+    definition_id: "invoice",
+    tables: { Invoice: [{ doc_id: "abc123", invoice_id: "INV-001" }] },
+  });
+
+  render(<App />);
+  // Wait until extraction has resolved and the export menu trigger has
+  // mounted in the panel.
+  const trigger = await screen.findByRole("button", { name: /Export options/i });
+  fireEvent.click(trigger);
+  fireEvent.click(await screen.findByText(/Download all tables \(JSON\)/i));
+
+  await waitFor(() =>
+    expect(api.exportTablesJson).toHaveBeenCalledWith("abc123", "invoice"),
+  );
 });

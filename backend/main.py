@@ -2,6 +2,7 @@
 
 import atexit
 import contextvars
+import csv
 import hashlib
 import io
 import json
@@ -25,6 +26,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+
+from transforms import TransformError, build_export
 
 # Per-request context variable, surfaced into log records via the filter below
 # so every line emitted while handling a request carries the same id without
@@ -2032,6 +2035,14 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     finally:
         _extract_semaphore.release()
 
+    # Expose target table names (not the full schema) so the frontend can
+    # render an Export menu without re-fetching the definition. Kept name-only
+    # to stay cheap and avoid leaking transform internals to the client.
+    target_table_names = [
+        t.get("name")
+        for t in (definition.get("target_tables") or [])
+        if isinstance(t, dict) and t.get("name")
+    ]
     response: dict = {
         "document_id": doc_id,
         "definition_id": def_id,
@@ -2039,6 +2050,7 @@ def extract_fields(doc_id: str, body: ExtractRequest):
         "document_description": definition.get("document", {}).get("document_description", ""),
         "fields": fields,
         "page_dimensions": text_data["page_dimensions"],
+        "target_tables": target_table_names,
     }
     # Surface a failure from the Docling pipeline so the frontend can tell
     # "no matches because nothing matched" apart from "no matches because
@@ -2047,6 +2059,118 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     if text_data.get("extraction_error"):
         response["extraction_error"] = text_data["extraction_error"]
     return response
+
+
+def _csv_response(table_name: str, rows: list[dict], filename_stem: str) -> Response:
+    """Serialize a single result table as CSV with stable column order.
+
+    Column order is taken from the first row's keys, which (because
+    `build_export` preserves the definition's column order via dict insertion)
+    matches the definition. Empty result sets emit just the header so the
+    downstream consumer can still tell schema from data.
+    """
+    buf = io.StringIO()
+    if rows:
+        fieldnames = list(rows[0].keys())
+    else:
+        fieldnames = []
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
+    body = buf.getvalue().encode("utf-8")
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", filename_stem).strip("_") or "export"
+    safe_table = re.sub(r"[^A-Za-z0-9._-]+", "_", table_name).strip("_") or "table"
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{safe_stem}-{safe_table}.csv"'
+            ),
+        },
+    )
+
+
+@app.get("/api/documents/{doc_id}/export")
+def export_document(
+    doc_id: str,
+    definition_id: str = Query(..., description="Definition id to apply."),
+    format: str = Query("json", description="json (all tables) or csv (one table)."),
+    table: Optional[str] = Query(
+        None,
+        description=(
+            "Required when format=csv: which target table to download. "
+            "Ignored for format=json (which returns all tables)."
+        ),
+    ),
+):
+    """Run extraction + apply target_tables transforms, return flat rows.
+
+    Wraps `/extract` and the transform engine. JSON returns every target
+    table at once; CSV requires `?table=<name>` because a single CSV can't
+    represent multiple tables coherently. Uses the same semaphore as
+    `/extract` so this endpoint can't be used to bypass the concurrency cap.
+    """
+    # Validate format in-band so we don't depend on Query(regex=) which has
+    # moved name across FastAPI/Pydantic versions (regex → pattern).
+    if format not in ("json", "csv"):
+        raise HTTPException(
+            status_code=400, detail="format must be 'json' or 'csv'."
+        )
+    filepath = _find_file(doc_id)
+    if not filepath:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    defs = _load_definitions()
+    if definition_id not in defs:
+        raise HTTPException(status_code=404, detail="Definition not found")
+    definition = defs[definition_id]
+
+    if not _extract_semaphore.acquire(blocking=False):
+        _metrics_inc("extractions_rejected")
+        raise HTTPException(
+            status_code=503,
+            detail="Too many concurrent extractions; retry shortly.",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        with _track_inflight():
+            text_data = _get_or_extract_text(filepath)
+            fields = _extract_fields(
+                definition, text_data["text_entries"], def_id=definition_id
+            )
+            _metrics_inc("extractions_completed")
+    finally:
+        _extract_semaphore.release()
+
+    try:
+        tables = build_export(definition, doc_id, fields)
+    except TransformError as e:
+        # Definition-level bug (unknown transform, malformed source, etc.) —
+        # surface as 422 so the client knows the input was bad, not the
+        # server. The exact message is safe to leak; it points at the
+        # offending definition, not user data.
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    if format == "csv":
+        if not table:
+            raise HTTPException(
+                status_code=400,
+                detail="CSV export requires ?table=<name>; use format=json for all tables.",
+            )
+        if table not in tables:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Table '{table}' not found in definition '{definition_id}'.",
+            )
+        return _csv_response(table, tables[table], filename_stem=doc_id)
+
+    return {
+        "document_id": doc_id,
+        "definition_id": definition_id,
+        "tables": tables,
+    }
 
 
 if __name__ == "__main__":

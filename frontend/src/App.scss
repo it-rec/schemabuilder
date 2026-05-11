@@ -301,6 +301,12 @@
   margin-bottom: spacing.$spacing-03;
 }
 
+.fields-panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: spacing.$spacing-02;
+}
+
 .fields-panel__title {
   @include type.type-style("heading-compact-01");
   color: var(--cds-text-primary, #161616);

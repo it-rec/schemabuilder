@@ -18,3 +18,10 @@ if (typeof global.ResizeObserver === "undefined") {
 if (typeof Element.prototype.scrollIntoView !== "function") {
   Element.prototype.scrollIntoView = function () {};
 }
+
+// jsdom doesn't expose Blob URL helpers. The export flow uses these to
+// trigger a download; tests just need them to be callable.
+if (typeof URL.createObjectURL !== "function") {
+  URL.createObjectURL = () => "blob:test";
+  URL.revokeObjectURL = () => {};
+}

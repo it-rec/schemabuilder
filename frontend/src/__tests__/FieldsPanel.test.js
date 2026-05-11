@@ -144,3 +144,41 @@ test("no highlighted class when highlightedField is null", () => {
   const row = screen.getByTestId("field-invoice_id");
   expect(row).not.toHaveClass("fields-panel__field-header--highlighted");
 });
+
+test("export menu is hidden when no target_tables are present", () => {
+  render(
+    <FieldsPanel
+      extraction={mockExtraction}
+      onHoverField={() => {}}
+      onExport={() => {}}
+      loading={false}
+    />,
+  );
+  expect(screen.queryByTestId("export-menu")).not.toBeInTheDocument();
+});
+
+test("export menu surfaces JSON + per-table CSV options and calls onExport", async () => {
+  const onExport = jest.fn();
+  const extractionWithTables = {
+    ...mockExtraction,
+    target_tables: ["Invoice", "line_items"],
+  };
+  render(
+    <FieldsPanel
+      extraction={extractionWithTables}
+      onHoverField={() => {}}
+      onExport={onExport}
+      loading={false}
+    />,
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: /Export options/i }));
+
+  // Carbon's OverflowMenu portals items into the body — find them by text.
+  fireEvent.click(await screen.findByText(/Download all tables \(JSON\)/i));
+  expect(onExport).toHaveBeenLastCalledWith({ format: "json" });
+
+  fireEvent.click(screen.getByRole("button", { name: /Export options/i }));
+  fireEvent.click(await screen.findByText(/Download "Invoice" \(CSV\)/i));
+  expect(onExport).toHaveBeenLastCalledWith({ format: "csv", table: "Invoice" });
+});

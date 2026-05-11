@@ -1,5 +1,10 @@
 import React, { useState, useMemo, useCallback } from "react";
-import { Tag, Tooltip } from "@carbon/react";
+import {
+  OverflowMenu,
+  OverflowMenuItem,
+  Tag,
+  Tooltip,
+} from "@carbon/react";
 import {
   CheckmarkFilled,
   WarningFilled,
@@ -255,11 +260,16 @@ const FieldItem = React.memo(function FieldItem({
 export default function FieldsPanel({
   extraction,
   onHoverField,
+  onExport,
   highlightedField,
   loading,
 }) {
   const fields = extraction?.fields;
   const highlightedEntryId = highlightedField?.matched_entry_id ?? null;
+  const tableNames = useMemo(
+    () => (Array.isArray(extraction?.target_tables) ? extraction.target_tables : []),
+    [extraction],
+  );
 
   const matchedCount = useMemo(() => {
     if (!fields) return 0;
@@ -302,9 +312,31 @@ export default function FieldsPanel({
         <h2 className="fields-panel__title">
           {extraction.document_type}
         </h2>
-        <Tag size="sm" type={matchedCount > 0 ? "green" : "gray"}>
-          {matchedCount}/{fields.length} found
-        </Tag>
+        <div className="fields-panel__header-actions">
+          <Tag size="sm" type={matchedCount > 0 ? "green" : "gray"}>
+            {matchedCount}/{fields.length} found
+          </Tag>
+          {onExport && tableNames.length > 0 && (
+            <OverflowMenu
+              size="sm"
+              flipped
+              iconDescription="Export options"
+              data-testid="export-menu"
+            >
+              <OverflowMenuItem
+                itemText="Download all tables (JSON)"
+                onClick={() => onExport({ format: "json" })}
+              />
+              {tableNames.map((t) => (
+                <OverflowMenuItem
+                  key={t}
+                  itemText={`Download "${t}" (CSV)`}
+                  onClick={() => onExport({ format: "csv", table: t })}
+                />
+              ))}
+            </OverflowMenu>
+          )}
+        </div>
       </div>
       {extraction.document_description && (
         <p className="fields-panel__description">
