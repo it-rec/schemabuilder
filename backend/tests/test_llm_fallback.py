@@ -83,7 +83,7 @@ def test_extract_field_returns_value_above_threshold(monkeypatch):
     result = llm_fallback.extract_field(
         field_name="vendor",
         field_description="The company we're paying",
-        examples=["IBM", "Microsoft"],
+        examples=["Globex", "Initech"],
         document_text="Invoice from ACME Corp. for services rendered.",
     )
     assert result == {"value": "ACME Corp.", "confidence": 0.95}
