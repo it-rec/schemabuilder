@@ -269,3 +269,11 @@ npm run lint && npm run test:ci && npm run build
 
 If any of the four gates (ruff, pytest, eslint, vitest, vite build) is red,
 the task is not done.
+
+---
+
+## Commit and Pull Requests
+
+When you commit or create pull request, leave out any claude references in comments and title.
+
+So NO `Generated with [Claude Code]` lines or equal.
