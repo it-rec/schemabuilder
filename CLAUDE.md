@@ -8,8 +8,9 @@ already burned a session.
 
 - `backend/` — FastAPI app (`main.py`), pytest suite under `backend/tests/`,
   ruff + mypy + pytest config in `backend/pyproject.toml`.
-- `frontend/` — Vite + React 18 + Carbon. Vitest tests in `frontend/src/__tests__/`,
-  ESLint config in `frontend/.eslintrc.json`, build config in `frontend/vite.config.js`.
+- `frontend/` — Vite + React 19 + Carbon. Vitest tests in `frontend/src/__tests__/`,
+  ESLint 9 flat config in `frontend/eslint.config.js`, build config in
+  `frontend/vite.config.js`.
 - `.github/workflows/ci.yml` — the source of truth for what "green" means.
 
 ## Golden rule
@@ -128,9 +129,9 @@ DocumentViewer, ExampleTeacher, FieldsPanel, TextEntriesPanel).
 
 Vitest exposes `describe / it / test / expect / vi` as globals (via
 `test.globals: true` in `vite.config.js`). Use `vi.fn()`, `vi.mock()`,
-`vi.spyOn()` — not the legacy `jest.*` equivalents. ESLint's test-file
-override in `.eslintrc.json` declares those globals so referencing them
-won't trip `no-undef`.
+`vi.spyOn()` — not the legacy `jest.*` equivalents. The test-file override
+in `eslint.config.js` declares those globals so referencing them won't
+trip `no-undef`.
 
 ### Lint
 
@@ -150,6 +151,13 @@ Common offenders:
   `getBy*`. (See commit `aaf6a69` for the pattern.)
 - `jsx-a11y/*` — Carbon components mostly handle this; only triggers on raw
   HTML.
+- `no-alert` is enabled on purpose. The three intentional `window.confirm`
+  call sites carry `// eslint-disable-next-line no-alert`; if you remove
+  one of those confirms, also remove the disable, otherwise ESLint 9 flags
+  it as a stale directive (which it treats as a warning → CI fail at 0).
+  When the disable is above a multi-line `if (...)`, put it on the same
+  line as the `!window.confirm(` call inside the parentheses, not above
+  the `if (` — ESLint 9 attaches `disable-next-line` to exactly one line.
 
 ### Build
 
