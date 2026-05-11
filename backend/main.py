@@ -62,7 +62,14 @@ if not logger.handlers and not logging.getLogger().handlers:
         format="%(levelname)s:    %(name)s: [%(request_id)s] %(message)s",
     )
 logger.setLevel(logging.INFO)
-logger.addFilter(_RequestIdFilter())
+# Attach the filter to every handler that uses our format string rather than to
+# a single logger. Records emitted by third-party loggers (uvicorn, watchfiles,
+# docling, ...) propagate to the root handler too, and without `request_id` on
+# those records the formatter raises `KeyError: 'request_id'`. Filters on a
+# handler run for every record the handler sees, regardless of origin.
+_request_id_filter = _RequestIdFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_request_id_filter)
 
 # Background workers for prefetch (page render warm-up, text extraction warm-up,
 # converter construction). Default to 4: the text-extraction leg is serialized
