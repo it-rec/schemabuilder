@@ -211,6 +211,16 @@ const FieldItem = React.memo(function FieldItem({
               regex
             </Tag>
           )}
+          {!isArray && field.match_reason === "llm_fallback" && (
+            <Tag
+              size="sm"
+              type="magenta"
+              title="This value came from the LLM fallback, not the rule-based matcher."
+              data-testid={`field-llm-${field.name}`}
+            >
+              LLM
+            </Tag>
+          )}
           {isArray && hasItems && (
             <Tag size="sm" type="blue">
               {field.items.length} item{field.items.length !== 1 ? "s" : ""}

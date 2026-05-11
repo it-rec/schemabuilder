@@ -28,6 +28,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import llm_fallback as _llm_fallback
 from extraction_cache import (
     get_default_cache as _get_extraction_cache,
 )
@@ -432,6 +433,10 @@ _metrics: dict = {
     # returned a cached response" — useful for tuning the cache size.
     "extractions_cache_hits": 0,
     "extractions_cache_misses": 0,
+    # Count of fields where the rule-based matcher failed and the LLM
+    # fallback was invoked successfully. Useful for tracking how much
+    # users are leaning on Anthropic API spend.
+    "llm_fallback_used": 0,
     # Incremented when a request is rejected because the global concurrency
     # cap is full. A non-zero rate here is a signal to bump
     # SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS or scale the process out.
@@ -1658,6 +1663,47 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
     for field in fields:
         result = _match_field_to_entries(field, candidates, used_ids)
         results.append(result)
+
+    # LLM fallback pass. Top-level scalar fields only — arrays go through
+    # their own per-item path and would need a different prompt design.
+    # The fallback never overrides a successful matcher hit; it only fills
+    # in fields that came back empty AND opted in via `use_llm_fallback`.
+    needing_fallback = [
+        (i, f)
+        for i, f in enumerate(fields)
+        if f.get("type") != "array"
+        and f.get("use_llm_fallback")
+        and results[i].get("extracted_value") is None
+    ]
+    if needing_fallback and _llm_fallback.is_available():
+        document_text = "\n".join(
+            e.get("text", "") for e in text_entries if isinstance(e, dict)
+        )
+        for i, field in needing_fallback:
+            try:
+                llm_result = _llm_fallback.extract_field(
+                    field_name=field.get("name", ""),
+                    field_description=field.get("description") or "",
+                    examples=field.get("examples"),
+                    document_text=document_text,
+                )
+            except Exception:
+                logger.exception(
+                    "LLM fallback raised for field %s", field.get("name")
+                )
+                continue
+            if not llm_result:
+                continue
+            results[i]["extracted_value"] = llm_result["value"]
+            results[i]["confidence"] = llm_result["confidence"]
+            results[i]["match_reason"] = "llm_fallback"
+            results[i]["match_score"] = int(llm_result["confidence"] * 100)
+            # LLM fallback can't tie back to a specific text_entry, so
+            # matched_entry_id / page / bbox stay None — the FieldsPanel
+            # already renders that case fine and just won't draw an
+            # overlay for the field.
+            results[i]["rejected_candidate"] = None
+            _metrics_inc("llm_fallback_used")
     return results
 
 
@@ -2136,6 +2182,11 @@ class FieldSpec(BaseModel):
     # the part you want (e.g. "IBAN: (DE\\d{20})"). Validated as a
     # compilable Python regex at upload time.
     pattern: Optional[str] = None
+    # When True, consult an LLM via the Anthropic SDK if the rule-based
+    # matcher couldn't find a value. Per-field opt-in so a single click
+    # doesn't fan out into surprise API spend across every field. Requires
+    # ANTHROPIC_API_KEY + the `anthropic` package; silently no-op otherwise.
+    use_llm_fallback: Optional[bool] = None
     fields: Optional[List["FieldSpec"]] = None
 
     @field_validator("pattern")

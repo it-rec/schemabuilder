@@ -112,6 +112,37 @@ test("edit flow: round-trips regex pattern; invalid pattern blocks save", async 
   expect(payload.document.fields[0].pattern).toBe("\\d+");
 });
 
+test("edit flow: round-trips use_llm_fallback checkbox", async () => {
+  const user = userEvent.setup();
+  api.fetchDefinition.mockResolvedValue({
+    document: {
+      document_type: "Doc",
+      fields: [{ name: "vendor", use_llm_fallback: false }],
+    },
+  });
+  api.updateDefinition.mockResolvedValue({ id: "doc" });
+
+  render(
+    <DefinitionEditor
+      open
+      mode="edit"
+      definitionId="doc"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  const checkbox = await screen.findByLabelText(/LLM fallback/i);
+  expect(checkbox).not.toBeChecked();
+  await user.click(checkbox);
+  await user.click(screen.getByRole("button", { name: /Save changes/i }));
+
+  await waitFor(() => expect(api.updateDefinition).toHaveBeenCalledTimes(1));
+  const [, payload] = api.updateDefinition.mock.calls[0];
+  expect(payload.document.fields[0].use_llm_fallback).toBe(true);
+});
+
 test("edit flow: hydrates min_confidence + round-trips it as 0-1 on save", async () => {
   const user = userEvent.setup();
   api.fetchDefinition.mockResolvedValue({

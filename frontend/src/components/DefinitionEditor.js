@@ -45,6 +45,10 @@ const EMPTY_FIELD = Object.freeze({
   // Optional regex applied to every text entry. Matches score 92 in the
   // backend matcher and the matched substring becomes the extracted value.
   pattern: "",
+  // Opt this field into the LLM fallback. The backend only consults
+  // Claude when the rule-based matcher came back empty; this flag is
+  // the kill-switch that prevents fan-out across every field.
+  use_llm_fallback: false,
   fields: [],
 });
 
@@ -62,6 +66,7 @@ function pruneField(field) {
     out.available_options = field.available_options.slice();
   if (field.affix) out.affix = true;
   if (field.pattern?.trim()) out.pattern = field.pattern.trim();
+  if (field.use_llm_fallback) out.use_llm_fallback = true;
   // Only emit min_confidence when the user actually set one. Convert from
   // the 0–100 UI value back to the 0–1 backend value, clamped to range.
   if (
@@ -95,6 +100,7 @@ function hydrateField(raw) {
         ? Math.round(raw.min_confidence * 100)
         : null,
     pattern: typeof raw?.pattern === "string" ? raw.pattern : "",
+    use_llm_fallback: !!raw?.use_llm_fallback,
     fields: Array.isArray(raw?.fields) ? raw.fields.map(hydrateField) : [],
   };
 }
@@ -343,6 +349,12 @@ function FieldEditor({ field, path, onChange, onRemove, depth = 0 }) {
             invalid={!isValidRegex(field.pattern)}
             invalidText="Not a valid regular expression."
             size="sm"
+          />
+          <Checkbox
+            id={`def-field-llm-${path}`}
+            labelText="Use LLM fallback when the matcher comes up empty (consumes Anthropic API credits)"
+            checked={field.use_llm_fallback}
+            onChange={(_, { checked }) => update({ use_llm_fallback: checked })}
           />
         </>
       )}

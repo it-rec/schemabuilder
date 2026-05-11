@@ -171,6 +171,24 @@ test("renders regex tag when field has a pattern", () => {
   expect(screen.getByTestId("field-pattern-invoice_id")).toHaveTextContent("regex");
 });
 
+test("renders LLM tag when match_reason is llm_fallback", () => {
+  const withLlm = {
+    ...mockExtraction,
+    fields: [
+      {
+        ...mockExtraction.fields[0],
+        extracted_value: "ACME",
+        match_reason: "llm_fallback",
+      },
+      ...mockExtraction.fields.slice(1),
+    ],
+  };
+  render(
+    <FieldsPanel extraction={withLlm} onHoverField={() => {}} loading={false} />,
+  );
+  expect(screen.getByTestId("field-llm-invoice_id")).toHaveTextContent("LLM");
+});
+
 test("does not render regex tag when pattern is missing or empty", () => {
   render(
     <FieldsPanel extraction={mockExtraction} onHoverField={() => {}} loading={false} />,

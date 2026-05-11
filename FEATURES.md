@@ -98,3 +98,8 @@ Status: ideas captured 2026-05-11. Shipped on branch
   edits don't invalidate; survives restarts; `?refresh=true` bypass;
   delete-doc invalidates by signature; bounded by an LRU on
   created_at)
+- #10 LLM fallback (per-field `use_llm_fallback` opt-in; when the
+  rule-based matcher returns empty, calls Claude via the Anthropic
+  SDK with structured outputs + prompt caching; lazy import so the
+  SDK isn't a hard dependency; `SCHEMABUILDER_LLM_MODEL` /
+  `_LLM_ENABLED` env knobs; FieldsPanel surfaces an "LLM" tag)
