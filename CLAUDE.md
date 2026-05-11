@@ -162,10 +162,20 @@ For reference — keep parity with this:
 
 | Job      | Steps                                                                  |
 | -------- | ---------------------------------------------------------------------- |
-| backend  | `pip install fastapi pydantic pytest httpx ruff mypy` → `ruff check .` → `mypy ... \|\| true` → `pytest tests/ -q` |
+| backend  | `pip install fastapi pydantic pytest httpx ruff mypy python-multipart` → `ruff check .` → `mypy ... \|\| true` → `python export_openapi.py` ↔ `openapi-snapshot.json` drift check → `pytest tests/ -q` |
 | frontend | `npm ci` → `npm run lint -- --max-warnings 999` → `npm run test:ci` → `npm run build` |
 
 Python 3.11, Node 20.
+
+> ⚠️ **Backend install list must match `.github/workflows/ci.yml` exactly.**
+> If you add an endpoint that pulls a new transitive (e.g. `python-multipart`
+> for `UploadFile`, or `pypdfium2` if a new test stops mocking it), you MUST
+> update **both** this CLAUDE.md install list **and** the workflow's
+> `Install lint/test tooling` step. CI uses the workflow file; local uses
+> this CLAUDE.md. They will drift silently because passing locally proves
+> nothing about CI. Past failure mode: an UploadFile route added without
+> updating CI, every pytest fails at import-time with a misleading
+> "Form data requires python-multipart" stack.
 
 ---
 
@@ -176,7 +186,9 @@ Python 3.11, Node 20.
 2. **Installing `requirements.txt` for tests.** Pulls Docling + torch.
    Unnecessary and slow. → use the lean install list above.
 3. **Forgetting `python-multipart`.** FastAPI form/upload handling breaks at
-   import time. → include it in the test install.
+   import time (the route walker calls `ensure_multipart_is_installed` when
+   it sees an `UploadFile` param). → include it in BOTH the local install
+   list above AND the CI workflow's install step. They drift silently.
 4. **`npm test` instead of `npm run test:ci`.** Hangs in watch mode. → always
    `test:ci` when scripted.
 5. **Empty `frontend/node_modules/`.** Lint, test, build all fail with
@@ -192,6 +204,18 @@ Python 3.11, Node 20.
    ruff/pytest.
 10. **Adding `# noqa` to silence ruff.** Almost always wrong. Fix the import
     order, remove the unused import, etc. Suppression is a last resort.
+11. **Pytest passes locally, CI's pytest fails on import.** Symptom: every
+    test fails with a `RuntimeError` or `ImportError` in the collection
+    phase rather than in an assertion. Cause: a runtime dep that's in the
+    local install list but missing from `.github/workflows/ci.yml`. See the
+    "Backend install list must match" callout above. Diagnose by
+    reproducing the CI install in a fresh venv:
+    ```bash
+    python -m venv /tmp/ci && . /tmp/ci/bin/activate
+    pip install fastapi pydantic pytest httpx ruff mypy   # exactly what CI installs
+    cd backend && pytest tests/ -q
+    ```
+    Whatever fails there is what CI will fail with.
 
 ---
 

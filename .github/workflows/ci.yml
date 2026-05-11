@@ -23,9 +23,15 @@ jobs:
         # Heavy ML deps from requirements.txt aren't needed for the test suite —
         # Docling is mocked in tests/test_api.py. Install only what the tests
         # and linters import so CI stays fast.
+        #
+        # python-multipart is NOT optional: FastAPI's UploadFile path
+        # (POST /api/documents) imports the multipart parser at route-
+        # registration time. Without it, `import main` raises and every
+        # pytest + the OpenAPI drift step fail with a misleading stack.
+        # Keep this list in sync with CLAUDE.md → Backend → Install deps.
         run: |
           python -m pip install --upgrade pip
-          pip install fastapi pydantic pytest httpx ruff mypy
+          pip install fastapi pydantic pytest httpx ruff mypy python-multipart
       - name: Ruff
         run: ruff check .
       - name: Mypy
