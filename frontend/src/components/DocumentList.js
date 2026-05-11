@@ -13,6 +13,7 @@ import {
   DocumentPdf,
   DocumentWordProcessor,
   PresentationFile,
+  Play,
   TrashCan,
   Upload,
 } from "@carbon/react/icons";
@@ -35,6 +36,7 @@ export default function DocumentList({
   onSelect,
   onUpload,
   onDelete,
+  onRunBatch,
   uploading,
 }) {
   const [query, setQuery] = useState("");
@@ -107,6 +109,23 @@ export default function DocumentList({
               data-testid="upload-input"
             />
           </>
+        )}
+        {onRunBatch && (
+          <Button
+            kind="ghost"
+            size="sm"
+            renderIcon={Play}
+            onClick={() => onRunBatch(filtered)}
+            disabled={filtered.length === 0}
+            data-testid="batch-run-button"
+            title={
+              filtered.length === documents.length
+                ? `Run extraction on all ${documents.length} documents`
+                : `Run extraction on the ${filtered.length} visible documents`
+            }
+          >
+            Run all
+          </Button>
         )}
       </div>
       <Search

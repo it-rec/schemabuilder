@@ -84,6 +84,20 @@ _SHUTDOWN_GRACE_SECONDS = float(os.getenv("SCHEMABUILDER_SHUTDOWN_GRACE") or 30)
 _MAX_CONCURRENT_EXTRACTS = max(1, int(os.getenv("SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS") or 4))
 _extract_semaphore = threading.BoundedSemaphore(_MAX_CONCURRENT_EXTRACTS)
 
+# In-memory tracker for batch-extract jobs. Each job advances sequentially —
+# the global _extract_semaphore already serializes individual extracts, so
+# spawning parallel batch workers would just contend on the same limit.
+# Garbage collected lazily on every new batch start: jobs older than the TTL
+# are dropped so the dict can't grow unbounded over the process lifetime.
+_batch_jobs: "dict[str, dict]" = {}
+_batch_jobs_lock = threading.Lock()
+_BATCH_JOB_TTL_SECONDS = max(60, int(os.getenv("SCHEMABUILDER_BATCH_TTL") or 3600))
+_BATCH_MAX_DOCS = max(1, int(os.getenv("SCHEMABUILDER_BATCH_MAX_DOCS") or 200))
+# Dedicated single-thread pool. One job at a time is enough — the semaphore
+# is the real bottleneck, and serial dispatch makes status reporting clean
+# (no per-doc interleaving in the completed counter).
+_batch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch")
+
 # Cap request body size (bytes). Definitions payloads are tiny in practice; a
 # huge body is either a misconfigured client or an attempt to OOM the matcher
 # by feeding it megabytes of `examples`. Enforced by middleware via
@@ -2519,6 +2533,176 @@ def export_document(
         "definition_id": definition_id,
         "tables": tables,
     }
+
+
+# ── Batch extraction ────────────────────────────────────────────────────
+
+
+class BatchExtractBody(BaseModel):
+    """Body for the batch-extract endpoint.
+
+    `document_ids` is bounded so a misconfigured client can't enqueue
+    thousands of documents in a single request — the cap is also enforced
+    in the route handler so the error message can name the actual limit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    document_ids: List[str] = Field(min_length=1)
+    definition_id: str = Field(min_length=1)
+
+
+def _sweep_old_batch_jobs() -> None:
+    """Drop completed jobs older than the TTL. Cheap: O(N) scan of a dict
+    that should stay short in practice. Called under _batch_jobs_lock."""
+    cutoff = time.time() - _BATCH_JOB_TTL_SECONDS
+    stale = [
+        jid
+        for jid, j in _batch_jobs.items()
+        if j.get("completed_at") and j["completed_at"] < cutoff
+    ]
+    for jid in stale:
+        _batch_jobs.pop(jid, None)
+
+
+def _public_batch_view(job: dict) -> dict:
+    """Job state minus internals (cancel event, raw definition) for the API."""
+    return {
+        "job_id": job["id"],
+        "definition_id": job["definition_id"],
+        "status": job["status"],
+        "total": job["total"],
+        "completed": job["completed"],
+        "results": job["results"],
+        "errors": job["errors"],
+        "started_at": job["started_at"],
+        "completed_at": job["completed_at"],
+    }
+
+
+def _run_batch_job(job: dict) -> None:
+    """Worker that walks the document list sequentially, honoring the
+    global extract semaphore + the in-flight tracker so a SIGTERM during
+    a batch is bounded by SCHEMABUILDER_SHUTDOWN_GRACE just like a single
+    /extract call.
+    """
+    job_id = job["id"]
+    cancelled: threading.Event = job["_cancelled"]
+    definition_id = job["definition_id"]
+    logger.info("Batch %s starting (%d docs)", job_id, job["total"])
+
+    for doc_id in job["document_ids"]:
+        if cancelled.is_set():
+            break
+        try:
+            filepath = _find_file(doc_id)
+            if not filepath:
+                raise ValueError("Document not found")
+
+            # blocking=True (not the 503-fast-fail pattern /extract uses):
+            # batch workers should queue behind interactive extracts rather
+            # than abandon the whole job.
+            _extract_semaphore.acquire()
+            try:
+                with _track_inflight():
+                    if cancelled.is_set():
+                        break
+                    text_data = _get_or_extract_text(filepath)
+                    defs = _load_definitions()
+                    definition = defs.get(definition_id)
+                    if not definition:
+                        raise ValueError("Definition no longer exists")
+                    fields = _extract_fields(
+                        definition, text_data["text_entries"], def_id=definition_id
+                    )
+                    _metrics_inc("extractions_completed")
+            finally:
+                _extract_semaphore.release()
+
+            job["results"][doc_id] = {
+                "document_id": doc_id,
+                "fields": fields,
+            }
+        except Exception as e:  # noqa: BLE001 — surface every per-doc failure
+            logger.exception("Batch %s: %s failed", job_id, doc_id)
+            job["errors"][doc_id] = str(e)
+        finally:
+            with _batch_jobs_lock:
+                job["completed"] += 1
+
+    with _batch_jobs_lock:
+        if job["status"] == "running":
+            job["status"] = "cancelled" if cancelled.is_set() else "done"
+        job["completed_at"] = time.time()
+    logger.info(
+        "Batch %s %s: %d completed, %d errors",
+        job_id, job["status"], job["completed"], len(job["errors"]),
+    )
+
+
+@app.post("/api/extract/batch")
+def start_batch_extract(body: BatchExtractBody):
+    """Kick off a batch extraction over `document_ids`.
+
+    Validates the definition exists up-front (404 if not) and that the doc
+    count is within the cap (413 if not). Otherwise spawns a worker and
+    returns the new `job_id` immediately so the client can poll
+    /api/extract/batch/{job_id} for progress.
+    """
+    if len(body.document_ids) > _BATCH_MAX_DOCS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Batch is bounded to {_BATCH_MAX_DOCS} documents per job.",
+        )
+    defs = _load_definitions()
+    if body.definition_id not in defs:
+        raise HTTPException(status_code=404, detail="Definition not found")
+
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id,
+        "definition_id": body.definition_id,
+        "document_ids": list(body.document_ids),
+        "status": "running",
+        "total": len(body.document_ids),
+        "completed": 0,
+        "results": {},
+        "errors": {},
+        "started_at": time.time(),
+        "completed_at": None,
+        "_cancelled": threading.Event(),
+    }
+    with _batch_jobs_lock:
+        _sweep_old_batch_jobs()
+        _batch_jobs[job_id] = job
+    _batch_pool.submit(_run_batch_job, job)
+    return {"job_id": job_id, "total": job["total"], "status": "running"}
+
+
+@app.get("/api/extract/batch/{job_id}")
+def get_batch_status(job_id: str):
+    """Current state of a batch job. Returns 404 once the TTL has elapsed."""
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Batch job not found")
+        return _public_batch_view(job)
+
+
+@app.delete("/api/extract/batch/{job_id}")
+def cancel_batch(job_id: str):
+    """Signal the batch worker to stop after its current document.
+
+    In-flight extractions aren't interrupted — Docling has no cancellation
+    hook — but no further documents will be enqueued. The job moves to
+    `cancelled` once the worker observes the flag.
+    """
+    with _batch_jobs_lock:
+        job = _batch_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Batch job not found")
+        job["_cancelled"].set()
+        return {"job_id": job_id, "cancelling": True}
 
 
 if __name__ == "__main__":

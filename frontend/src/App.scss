@@ -223,6 +223,31 @@
   color: var(--cds-text-helper, #6f6f6f);
 }
 
+// BatchExtractModal styles. Plain layout — the heavy lifting (progress bar,
+// modal chrome) is Carbon.
+.batch-modal__intro {
+  @include type.type-style("body-compact-01");
+  margin: 0 0 spacing.$spacing-04 0;
+  color: var(--cds-text-primary, #161616);
+}
+
+.batch-modal__errors {
+  margin-top: spacing.$spacing-04;
+  padding: spacing.$spacing-03 spacing.$spacing-04;
+  background: var(--cds-notification-background-warning, #fcf4d6);
+  border-left: 3px solid var(--cds-support-warning, #f1c21b);
+  @include type.type-style("label-01");
+
+  ul {
+    margin: spacing.$spacing-02 0 0;
+    padding-left: spacing.$spacing-05;
+  }
+
+  code {
+    font-family: var(--cds-code-02-font-family, monospace);
+  }
+}
+
 // DocumentList styles
 .document-list {
   padding: spacing.$spacing-05;

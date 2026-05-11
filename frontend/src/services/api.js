@@ -249,6 +249,36 @@ export async function deleteDefinition(defId, { signal } = {}) {
   return res.json();
 }
 
+// Start a batch extract over the given document ids. Returns
+// `{ job_id, total, status }`. Poll getBatchStatus to track progress.
+export async function startBatchExtract(documentIds, definitionId, { signal } = {}) {
+  const res = await request("/api/extract/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ document_ids: documentIds, definition_id: definitionId }),
+    signal,
+    errorFallback: "Failed to start batch extraction",
+  });
+  return res.json();
+}
+
+export async function getBatchStatus(jobId, { signal } = {}) {
+  const res = await request(`/api/extract/batch/${jobId}`, {
+    signal,
+    errorFallback: "Failed to fetch batch status",
+  });
+  return res.json();
+}
+
+export async function cancelBatch(jobId, { signal } = {}) {
+  const res = await request(`/api/extract/batch/${jobId}`, {
+    method: "DELETE",
+    signal,
+    errorFallback: "Failed to cancel batch",
+  });
+  return res.json();
+}
+
 // Append a value to a field's `examples` list. The field path is either a
 // top-level field name or a one-level dotted path like "line_items.amount".
 // Returns the new examples array on success; throws on 404 (missing

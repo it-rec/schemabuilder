@@ -106,6 +106,28 @@ test("delete icon prompts then calls onDelete with the doc", () => {
   window.confirm.mockRestore();
 });
 
+test("Run all forwards the visible documents to onRunBatch", async () => {
+  const user = userEvent.setup();
+  const onRunBatch = jest.fn();
+  render(
+    <DocumentList
+      documents={mockDocs}
+      selectedId={null}
+      onSelect={() => {}}
+      onRunBatch={onRunBatch}
+    />,
+  );
+  await user.click(screen.getByTestId("batch-run-button"));
+  expect(onRunBatch).toHaveBeenCalledWith(mockDocs);
+});
+
+test("Run all is hidden when onRunBatch is not provided", () => {
+  render(
+    <DocumentList documents={mockDocs} selectedId={null} onSelect={() => {}} />,
+  );
+  expect(screen.queryByTestId("batch-run-button")).not.toBeInTheDocument();
+});
+
 test("delete is skipped when the confirm dialog is cancelled", () => {
   jest.spyOn(window, "confirm").mockImplementation(() => false);
   const onDelete = jest.fn();

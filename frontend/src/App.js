@@ -15,6 +15,7 @@ import DocumentViewer from "./components/DocumentViewer";
 import FieldsPanel from "./components/FieldsPanel";
 import DefinitionEditor from "./components/DefinitionEditor";
 import ExampleTeacher from "./components/ExampleTeacher";
+import BatchExtractModal from "./components/BatchExtractModal";
 import {
   fetchDocuments,
   fetchDocument,
@@ -254,6 +255,14 @@ export default function App() {
   }, []);
 
   const [uploading, setUploading] = useState(false);
+  // Documents queued into the BatchExtractModal. Null when the modal is
+  // closed, an array of {id, filename} when open.
+  const [batchDocs, setBatchDocs] = useState(null);
+
+  const handleRunBatch = useCallback((docs) => {
+    if (!docs?.length) return;
+    setBatchDocs(docs);
+  }, []);
 
   const refreshDocuments = useCallback(async () => {
     try {
@@ -500,6 +509,7 @@ export default function App() {
               onSelect={handleSelect}
               onUpload={handleUploadDocuments}
               onDelete={handleDeleteDocument}
+              onRunBatch={selectedDefId ? handleRunBatch : null}
               uploading={uploading}
             />
           </aside>
@@ -552,6 +562,17 @@ export default function App() {
           extraction={extraction}
           onClose={() => setTeachEntry(null)}
           onSaved={handleTeachSaved}
+        />
+      )}
+      {batchDocs != null && (
+        <BatchExtractModal
+          open
+          documents={batchDocs}
+          definitionId={selectedDefId}
+          definitionLabel={
+            definitions.find((d) => d.id === selectedDefId)?.document_type || ""
+          }
+          onClose={() => setBatchDocs(null)}
         />
       )}
     </Theme>

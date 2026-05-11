@@ -87,3 +87,9 @@ Status: ideas captured 2026-05-11. Shipped on branch
   on first load; j/ArrowDown + k/ArrowUp cycle documents and
   ArrowLeft/Right scroll pages, all suppressed when focus is in a
   form control so they don't fight with typing)
+- #5 Batch extraction (POST /api/extract/batch enqueues a job that
+  runs sequentially behind the existing concurrency semaphore; GET /
+  /api/extract/batch/{id} returns progress for polling; DELETE
+  cancels after the current document. UI: "Run all" button in the
+  sidebar, modal with a ProgressBar + cancel + JSON download of the
+  aggregated results)
