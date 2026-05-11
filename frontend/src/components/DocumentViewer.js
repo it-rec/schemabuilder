@@ -81,6 +81,35 @@ export default function DocumentViewer({
     [numPages],
   );
 
+  // Global ArrowLeft / ArrowRight scroll through pages. Skipped when focus
+  // is inside a form control or contenteditable — the document list / app
+  // keyboard handler has the same guard, so editing in a modal won't
+  // unexpectedly flip the viewer page.
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        handlePrev();
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        handleNext();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handlePrev, handleNext]);
+
   // Convert a Docling bbox (coordinate origin either TOPLEFT or BOTTOMLEFT,
   // measured in the page's native units) to pixel coordinates inside the
   // rendered <img>. Returns null when we don't yet know the image dimensions

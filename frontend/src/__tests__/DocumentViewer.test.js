@@ -165,6 +165,40 @@ test("hovering an overlay calls onHoverField with the underlying field", () => {
   expect(onHoverField).toHaveBeenLastCalledWith(null);
 });
 
+test("ArrowRight / ArrowLeft navigate pages; ignored when typing in inputs", () => {
+  const { rerender } = render(
+    <DocumentViewer
+      docId="abc"
+      documentData={mockDocData}
+      highlightedField={null}
+      loading={false}
+    />,
+  );
+  expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "ArrowRight" });
+  expect(screen.getByText("Page 2 of 3")).toBeInTheDocument();
+
+  fireEvent.keyDown(window, { key: "ArrowLeft" });
+  expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+
+  // While focus is in an input, ArrowRight must NOT advance the page.
+  rerender(
+    <DocumentViewer
+      docId="abc"
+      documentData={mockDocData}
+      highlightedField={null}
+      loading={false}
+    />,
+  );
+  const fakeInput = document.createElement("input");
+  document.body.appendChild(fakeInput);
+  fakeInput.focus();
+  fireEvent.keyDown(fakeInput, { key: "ArrowRight" });
+  expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
+  fakeInput.remove();
+});
+
 test("renders a teach target per text entry on the current page and invokes onTeachEntry on click", () => {
   const textEntries = [
     {

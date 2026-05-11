@@ -82,3 +82,8 @@ Status: ideas captured 2026-05-11. Shipped on branch
   DELETE /api/documents/{id} purges the render/text caches so a re-
   upload doesn't serve stale pages; sidebar gets an Upload button and
   a trash-can per row)
+- #13 Dark mode + keyboard navigation (g10 ↔ g90 toggle in the header,
+  persisted to localStorage, falls back to the OS prefers-color-scheme
+  on first load; j/ArrowDown + k/ArrowUp cycle documents and
+  ArrowLeft/Right scroll pages, all suppressed when focus is in a
+  form control so they don't fight with typing)

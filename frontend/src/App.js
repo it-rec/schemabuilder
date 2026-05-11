@@ -3,11 +3,13 @@ import {
   Theme,
   Header,
   HeaderName,
+  HeaderGlobalBar,
+  HeaderGlobalAction,
   Content,
   Dropdown,
   Button,
 } from "@carbon/react";
-import { Add, Edit } from "@carbon/react/icons";
+import { Add, Asleep, Edit, Light } from "@carbon/react/icons";
 import DocumentList from "./components/DocumentList";
 import DocumentViewer from "./components/DocumentViewer";
 import FieldsPanel from "./components/FieldsPanel";
@@ -50,6 +52,69 @@ export default function App() {
   // modal is closed. Storing the entry (not just open/closed) lets the modal
   // render the chosen text without needing a second prop.
   const [teachEntry, setTeachEntry] = useState(null);
+
+  // Theme: g10 (light) ↔ g90 (dark). Persisted to localStorage so the user's
+  // choice survives reloads. Also honors the OS-level dark-mode preference
+  // when no value has been stored yet.
+  const [theme, setTheme] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem("schemabuilder.theme");
+      if (stored === "g10" || stored === "g90") return stored;
+      if (
+        window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches
+      ) {
+        return "g90";
+      }
+    } catch (_) {
+      /* localStorage may be blocked (private mode, sandboxed iframe) */
+    }
+    return "g10";
+  });
+
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => {
+      const next = t === "g10" ? "g90" : "g10";
+      try {
+        window.localStorage.setItem("schemabuilder.theme", next);
+      } catch (_) {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
+  // Global keyboard navigation. j / ArrowDown → next document, k / ArrowUp →
+  // previous. Skipped when focus is inside a form control / contenteditable
+  // so the shortcuts don't fight with normal typing (including modal inputs).
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      if (!documents.length) return;
+      const idx = documents.findIndex((d) => d.id === selectedDocId);
+      if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        const next = idx < 0 ? 0 : Math.min(documents.length - 1, idx + 1);
+        setSelectedDocId(documents[next].id);
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const prev = idx <= 0 ? 0 : idx - 1;
+        setSelectedDocId(documents[prev].id);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [documents, selectedDocId]);
 
   // Counter that forces the extract effect to re-run after a successful
   // teach. Bumping this is enough — the effect depends on `extractCycle`, so
@@ -372,11 +437,21 @@ export default function App() {
   }, [extraction]);
 
   return (
-    <Theme theme="g10">
+    <Theme theme={theme}>
       <Header aria-label="IBM Schema Builder">
         <HeaderName prefix="IBM" href="#" onClick={(e) => e.preventDefault()}>
           Schema Builder
         </HeaderName>
+        <HeaderGlobalBar>
+          <HeaderGlobalAction
+            aria-label={theme === "g10" ? "Switch to dark mode" : "Switch to light mode"}
+            onClick={toggleTheme}
+            tooltipAlignment="end"
+            data-testid="theme-toggle"
+          >
+            {theme === "g10" ? <Asleep size={20} /> : <Light size={20} />}
+          </HeaderGlobalAction>
+        </HeaderGlobalBar>
       </Header>
       <Content className="app-content">
         <h1 className="cds--visually-hidden">IBM Schema Builder</h1>

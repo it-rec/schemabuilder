@@ -19,6 +19,10 @@
   padding-top: 3rem; // Account for Carbon header
   height: 100vh;
   box-sizing: border-box;
+  // Theme tokens flip with g10 ↔ g90, but the outer <body> stays at the
+  // browser default. Force the app's surface to honor the active theme.
+  background: var(--cds-background, #ffffff);
+  color: var(--cds-text-primary, #161616);
 }
 
 .app-layout {
