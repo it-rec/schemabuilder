@@ -632,6 +632,59 @@ def _resolve_accelerator_device(AcceleratorDevice):
     return getattr(AcceleratorDevice, "AUTO", AcceleratorDevice.CPU)
 
 
+def _import_docling_symbols(paths: tuple[str, ...], names: tuple[str, ...]) -> tuple:
+    """Find the first docling submodule in `paths` that exposes ALL `names`.
+
+    Docling reshuffles where its public symbols live across releases (and
+    between the `docling` metapackage and `docling-slim`). Rather than hard-code
+    one location and re-break every time it moves, walk a list of candidate
+    module paths and pick the first that satisfies the requested symbols.
+    Raises `ModuleNotFoundError` if none do, so the caller's existing warm-up
+    `try/except` logs a single actionable error instead of leaking a generic
+    `ImportError` for whichever symbol happened to break first.
+    """
+    last_err: Exception | None = None
+    tried: list[str] = []
+    for path in paths:
+        try:
+            module = importlib.import_module(path)
+        except ImportError as exc:
+            last_err = exc
+            tried.append(f"{path} (not importable)")
+            continue
+        resolved = tuple(getattr(module, n, None) for n in names)
+        if all(r is not None for r in resolved):
+            return resolved
+        missing = [n for n, r in zip(names, resolved, strict=True) if r is None]
+        tried.append(f"{path} (missing: {', '.join(missing)})")
+    raise ModuleNotFoundError(
+        "Could not locate docling symbols "
+        f"{names} in any of: {'; '.join(tried)}"
+    ) from last_err
+
+
+# Candidate locations for each docling symbol group, ordered newest-known-good
+# first then progressively broader fallbacks. Add new layouts to the front of
+# the tuple as docling reorganizes — every group goes through the same lookup
+# so a future move surfaces a clear error instead of breaking startup.
+_PDF_PIPELINE_OPTIONS_PATHS = (
+    "docling.datamodel.pipeline_options",
+    "docling.datamodel.pdf_pipeline_options",
+    "docling.datamodel",
+    "docling",
+)
+_DOC_CONVERTER_PATHS = (
+    "docling.document_converter",
+    "docling",
+)
+_ACCELERATOR_PATHS = (
+    "docling.datamodel.accelerator_options",
+    "docling.datamodel.pipeline_options",
+    "docling.datamodel",
+    "docling",
+)
+
+
 def _build_text_converter(do_ocr: bool):
     """Build a Docling DocumentConverter with accelerator + OCR settings.
 
@@ -642,21 +695,15 @@ def _build_text_converter(do_ocr: bool):
     is left on (default) — the field-extraction code in `_match_array_field`
     relies on TableItem detection.
     """
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-
-    # AcceleratorOptions/AcceleratorDevice moved between submodules across
-    # docling versions (pipeline_options on 2.14, accelerator_options later).
-    try:
-        from docling.datamodel.accelerator_options import (  # type: ignore
-            AcceleratorDevice,
-            AcceleratorOptions,
-        )
-    except ImportError:
-        from docling.datamodel.pipeline_options import (  # type: ignore
-            AcceleratorDevice,
-            AcceleratorOptions,
-        )
+    (PdfPipelineOptions,) = _import_docling_symbols(
+        _PDF_PIPELINE_OPTIONS_PATHS, ("PdfPipelineOptions",)
+    )
+    DocumentConverter, PdfFormatOption = _import_docling_symbols(
+        _DOC_CONVERTER_PATHS, ("DocumentConverter", "PdfFormatOption")
+    )
+    AcceleratorDevice, AcceleratorOptions = _import_docling_symbols(
+        _ACCELERATOR_PATHS, ("AcceleratorDevice", "AcceleratorOptions")
+    )
 
     num_threads = int(os.getenv("DOCLING_NUM_THREADS") or os.cpu_count() or 4)
     device = _resolve_accelerator_device(AcceleratorDevice)
