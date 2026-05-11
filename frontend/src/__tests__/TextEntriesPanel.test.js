@@ -25,7 +25,7 @@ test("shows entry count in title", () => {
 });
 
 test("calls onHoverEntry with entry id on mouse enter", () => {
-  const onHover = jest.fn();
+  const onHover = vi.fn();
   render(
     <TextEntriesPanel entries={mockEntries} onHoverEntry={onHover} loading={false} />
   );
@@ -34,7 +34,7 @@ test("calls onHoverEntry with entry id on mouse enter", () => {
 });
 
 test("calls onHoverEntry with null on mouse leave", () => {
-  const onHover = jest.fn();
+  const onHover = vi.fn();
   render(
     <TextEntriesPanel entries={mockEntries} onHoverEntry={onHover} loading={false} />
   );

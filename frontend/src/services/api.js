@@ -1,8 +1,8 @@
-const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 // Default per-request timeout. Beyond this we abort and let the caller retry
 // or surface the failure — better than letting a stuck server pin the UI.
-const DEFAULT_TIMEOUT_MS = Number(process.env.REACT_APP_API_TIMEOUT_MS) || 30_000;
+const DEFAULT_TIMEOUT_MS = Number(import.meta.env.VITE_API_TIMEOUT_MS) || 30_000;
 
 // Retry budget for idempotent GETs. Mutations (POST/PATCH/DELETE) don't retry
 // because we can't tell from the client whether a 5xx happened before or

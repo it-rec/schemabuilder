@@ -3,17 +3,17 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import DefinitionHistory from "../components/DefinitionHistory";
 import * as api from "../services/api";
 
-jest.mock("../services/api");
+vi.mock("../services/api");
 
 beforeEach(() => {
   api.fetchDefinitionVersions.mockReset();
   api.fetchDefinitionVersion.mockReset();
   api.fetchDefinition.mockReset();
   api.updateDefinition.mockReset();
-  jest.spyOn(window, "confirm").mockImplementation(() => true);
+  vi.spyOn(window, "confirm").mockImplementation(() => true);
 });
 afterEach(() => {
-  jest.restoreAllMocks();
+  vi.restoreAllMocks();
 });
 
 test("shows an empty-state message when no versions are archived", async () => {
@@ -74,7 +74,7 @@ test("Restore prompts then PATCHes with the archived content", async () => {
   };
   api.fetchDefinitionVersion.mockResolvedValue(restored);
   api.updateDefinition.mockResolvedValue({ id: "inv" });
-  const onRestored = jest.fn();
+  const onRestored = vi.fn();
 
   render(
     <DefinitionHistory

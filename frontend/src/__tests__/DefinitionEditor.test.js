@@ -4,12 +4,12 @@ import userEvent from "@testing-library/user-event";
 import DefinitionEditor from "../components/DefinitionEditor";
 import * as api from "../services/api";
 
-jest.mock("../services/api");
+vi.mock("../services/api");
 
 // jsdom doesn't implement window.confirm — the delete path calls it, so we
 // stub a default of `true` per-test (overridden in the "cancel delete" case).
 beforeEach(() => {
-  jest.spyOn(window, "confirm").mockImplementation(() => true);
+  vi.spyOn(window, "confirm").mockImplementation(() => true);
   api.fetchDefinition.mockReset();
   api.uploadDefinition.mockReset();
   api.updateDefinition.mockReset();
@@ -17,13 +17,13 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  jest.restoreAllMocks();
+  vi.restoreAllMocks();
 });
 
 test("create flow: posts a new definition with the entered values", async () => {
   const user = userEvent.setup();
   api.uploadDefinition.mockResolvedValue({ id: "purchase_order", document_type: "Purchase Order", field_count: 1 });
-  const onSaved = jest.fn();
+  const onSaved = vi.fn();
 
   render(
     <DefinitionEditor
@@ -193,7 +193,7 @@ test("edit flow: hydrates from fetched definition and preserves extras on save",
   };
   api.fetchDefinition.mockResolvedValue(remote);
   api.updateDefinition.mockResolvedValue({ id: "invoice", document_type: "Invoice", field_count: 1 });
-  const onSaved = jest.fn();
+  const onSaved = vi.fn();
 
   render(
     <DefinitionEditor
@@ -234,7 +234,7 @@ test("edit flow: delete calls API after confirmation", async () => {
     document: { document_type: "Invoice", fields: [] },
   });
   api.deleteDefinition.mockResolvedValue({ id: "invoice" });
-  const onDeleted = jest.fn();
+  const onDeleted = vi.fn();
 
   render(
     <DefinitionEditor

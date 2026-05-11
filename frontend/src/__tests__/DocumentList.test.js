@@ -31,7 +31,7 @@ test("filters documents by search query", async () => {
 });
 
 test("calls onSelect when a document is clicked", () => {
-  const onSelect = jest.fn();
+  const onSelect = vi.fn();
   render(
     <DocumentList documents={mockDocs} selectedId={null} onSelect={onSelect} />
   );
@@ -65,7 +65,7 @@ test("upload button is hidden when onUpload is not provided", () => {
 });
 
 test("upload button forwards picked files to onUpload", () => {
-  const onUpload = jest.fn();
+  const onUpload = vi.fn();
   render(
     <DocumentList
       documents={mockDocs}
@@ -87,9 +87,9 @@ test("upload button forwards picked files to onUpload", () => {
 });
 
 test("delete icon prompts then calls onDelete with the doc", () => {
-  jest.spyOn(window, "confirm").mockImplementation(() => true);
-  const onDelete = jest.fn();
-  const onSelect = jest.fn();
+  vi.spyOn(window, "confirm").mockImplementation(() => true);
+  const onDelete = vi.fn();
+  const onSelect = vi.fn();
   render(
     <DocumentList
       documents={mockDocs}
@@ -108,7 +108,7 @@ test("delete icon prompts then calls onDelete with the doc", () => {
 
 test("Run all forwards the visible documents to onRunBatch", async () => {
   const user = userEvent.setup();
-  const onRunBatch = jest.fn();
+  const onRunBatch = vi.fn();
   render(
     <DocumentList
       documents={mockDocs}
@@ -129,8 +129,8 @@ test("Run all is hidden when onRunBatch is not provided", () => {
 });
 
 test("delete is skipped when the confirm dialog is cancelled", () => {
-  jest.spyOn(window, "confirm").mockImplementation(() => false);
-  const onDelete = jest.fn();
+  vi.spyOn(window, "confirm").mockImplementation(() => false);
+  const onDelete = vi.fn();
   render(
     <DocumentList
       documents={mockDocs}

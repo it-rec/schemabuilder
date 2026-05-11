@@ -8,7 +8,7 @@ import * as api from "../services/api";
 // `waitFor` is reserved below for assertions that aren't element lookups
 // (e.g. checking that a mocked API function was called).
 
-jest.mock("../services/api");
+vi.mock("../services/api");
 
 const mockDocs = [
   { id: "abc123", filename: "sample.pdf", extension: ".pdf", size: 1024 },
@@ -129,7 +129,7 @@ test("export menu triggers JSON download via api.exportTablesJson", async () => 
     ...mockExtraction,
     target_tables: ["Invoice"],
   });
-  api.exportTablesJson = jest.fn().mockResolvedValue({
+  api.exportTablesJson.mockResolvedValue({
     document_id: "abc123",
     definition_id: "invoice",
     tables: { Invoice: [{ doc_id: "abc123", invoice_id: "INV-001" }] },

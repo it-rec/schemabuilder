@@ -8,8 +8,8 @@ already burned a session.
 
 - `backend/` — FastAPI app (`main.py`), pytest suite under `backend/tests/`,
   ruff + mypy + pytest config in `backend/pyproject.toml`.
-- `frontend/` — CRA + React 18 + Carbon. Jest tests in `frontend/src/__tests__/`,
-  ESLint config in `frontend/package.json` (`eslintConfig`).
+- `frontend/` — Vite + React 18 + Carbon. Vitest tests in `frontend/src/__tests__/`,
+  ESLint config in `frontend/.eslintrc.json`, build config in `frontend/vite.config.js`.
 - `.github/workflows/ci.yml` — the source of truth for what "green" means.
 
 ## Golden rule
@@ -116,14 +116,21 @@ gives a reproducible tree and is what CI uses. If `node_modules/` is empty,
 
 ```bash
 cd frontend
-npm run test:ci          # one-shot, the only correct command for scripted runs
+npm run test:ci          # vitest run — one-shot, scripted
 ```
 
-Do NOT use `npm test` from a non-interactive shell — it launches Jest in watch
-mode and hangs forever. `test:ci` sets `CI=true` and passes `--watchAll=false`.
+Do NOT use `npm test` from a non-interactive shell — it launches Vitest in
+watch mode and hangs forever. `test:ci` runs `vitest run` (single pass).
 
-Expected: `Test Suites: 5 passed, 5 total` (App, DocumentList, DocumentViewer,
-FieldsPanel, TextEntriesPanel).
+Expected: `Test Files 9 passed (9)` / `Tests 77 passed (77)` (App,
+BatchExtractModal, DefinitionEditor, DefinitionHistory, DocumentList,
+DocumentViewer, ExampleTeacher, FieldsPanel, TextEntriesPanel).
+
+Vitest exposes `describe / it / test / expect / vi` as globals (via
+`test.globals: true` in `vite.config.js`). Use `vi.fn()`, `vi.mock()`,
+`vi.spyOn()` — not the legacy `jest.*` equivalents. ESLint's test-file
+override in `.eslintrc.json` declares those globals so referencing them
+won't trip `no-undef`.
 
 ### Lint
 
@@ -148,11 +155,28 @@ Common offenders:
 
 ```bash
 cd frontend
-npm run build
+npm run build           # vite build — output goes to frontend/build/
 ```
 
-Webpack treats warnings as errors under `CI=true`. If lint passes but build
-fails, look for unused imports the linter didn't catch.
+If lint passes but `vite build` warns about unresolved URLs (e.g.
+`~@ibm/plex/...didn't resolve at build time`), it means Carbon's SCSS
+emitted a webpack `~`-prefixed `url()` that the alias in `vite.config.js`
+(`{ find: /^~(.+)$/, replacement: "$1" }`) isn't matching — fix the alias.
+A warning here is a real bug: the resulting CSS will reference a literal
+`~@ibm/plex/...` URL and the font will 404 in production.
+
+### Dev server / env vars
+
+```bash
+cd frontend
+npm run dev             # vite dev server on http://localhost:3000
+```
+
+Client-side env vars must be prefixed `VITE_` (not `REACT_APP_`) and are
+read via `import.meta.env.VITE_FOO`. The two we use today are `VITE_API_URL`
+and `VITE_API_TIMEOUT_MS` (see `src/services/api.js`). If you add another and
+forget the `VITE_` prefix, Vite silently drops it and you'll get `undefined`
+at runtime — there is no helpful error.
 
 ---
 
@@ -163,7 +187,7 @@ For reference — keep parity with this:
 | Job      | Steps                                                                  |
 | -------- | ---------------------------------------------------------------------- |
 | backend  | `pip install fastapi pydantic pytest httpx ruff mypy python-multipart` → `ruff check .` → `mypy ... \|\| true` → `python export_openapi.py` ↔ `openapi-snapshot.json` drift check → `pytest tests/ -q` |
-| frontend | `npm ci` → `npm run lint -- --max-warnings 999` → `npm run test:ci` → `npm run build` |
+| frontend | `npm ci` → `npm run lint -- --max-warnings 999` → `npm run test:ci` (vitest run) → `npm run build` (vite build) |
 
 Python 3.11, Node 20.
 
@@ -189,8 +213,8 @@ Python 3.11, Node 20.
    import time (the route walker calls `ensure_multipart_is_installed` when
    it sees an `UploadFile` param). → include it in BOTH the local install
    list above AND the CI workflow's install step. They drift silently.
-4. **`npm test` instead of `npm run test:ci`.** Hangs in watch mode. → always
-   `test:ci` when scripted.
+4. **`npm test` instead of `npm run test:ci`.** Hangs in Vitest watch mode. →
+   always `test:ci` when scripted.
 5. **Empty `frontend/node_modules/`.** Lint, test, build all fail with
    nonsense errors. → `npm ci` first.
 6. **Local lint passes, CI fails (or vice versa).** Local = `--max-warnings 0`,
@@ -235,5 +259,5 @@ cd ../frontend
 npm run lint && npm run test:ci && npm run build
 ```
 
-If any of the four gates (ruff, pytest, eslint, jest, build) is red, the task
-is not done.
+If any of the four gates (ruff, pytest, eslint, vitest, vite build) is red,
+the task is not done.
