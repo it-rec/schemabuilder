@@ -135,7 +135,11 @@ test("renders the offline overlay when the health probe fails", async () => {
   api.fetchDefinitions.mockClear();
   render(<App />);
   expect(await screen.findByTestId("offline-overlay")).toBeInTheDocument();
-  expect(screen.getByText(/you're offline/i)).toBeInTheDocument();
+  // The overlay mounts immediately in its `online === null` "Connecting…"
+  // state and only flips to "You're offline" once the checkHealth rejection
+  // has propagated. findByText waits for that state transition; getByText
+  // can fire before the promise rejects and reads stale text on a fast CI.
+  expect(await screen.findByText(/you're offline/i)).toBeInTheDocument();
   // Data fetches are gated until /health succeeds.
   expect(api.fetchDocuments).not.toHaveBeenCalled();
 });
