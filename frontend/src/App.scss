@@ -16,7 +16,11 @@
 }
 
 .app-content {
-  padding-top: 3rem; // Account for Carbon header
+  // Carbon's <Content> ships with `padding: 2rem` on all sides. The three
+  // panes own their own internal padding (definition-selector, document-list,
+  // fields-panel, etc.), so we zero the shell gutter and let the grid
+  // span edge-to-edge under the header.
+  padding: 3rem 0 0 0; // padding-top accounts for the Carbon header
   height: 100vh;
   box-sizing: border-box;
   // Theme tokens flip with g10 ↔ g90, but the outer <body> stays at the
