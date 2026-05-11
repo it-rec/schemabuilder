@@ -140,17 +140,18 @@ test("renders the offline overlay when the health probe fails", async () => {
   expect(api.fetchDocuments).not.toHaveBeenCalled();
 });
 
-test("retry button re-probes and loads data once the backend is back", async () => {
-  // First probe (on mount) fails; subsequent probes (the retry click + the
-  // polling tick afterwards) succeed. The hook re-runs the initial loads on
-  // every offline→online transition, so fetchDocuments should fire.
+test("overlay clears and data loads automatically once the backend is back", async () => {
+  // First probe (on mount) fails; subsequent probes succeed. A browser
+  // `online` event is the cheapest way to trigger an immediate re-probe
+  // without relying on the 3s polling timer. The hook re-runs the initial
+  // loads on every offline→online transition, so fetchDocuments should fire.
   api.checkHealth
     .mockRejectedValueOnce(new Error("Network error"))
     .mockResolvedValue({ status: "ok" });
 
   render(<App />);
-  const retry = await screen.findByTestId("offline-overlay-retry");
-  fireEvent.click(retry);
+  await screen.findByTestId("offline-overlay");
+  window.dispatchEvent(new Event("online"));
 
   await waitFor(() =>
     expect(screen.queryByTestId("offline-overlay")).not.toBeInTheDocument(),
