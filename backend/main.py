@@ -20,7 +20,8 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi import File as FastAPIFile
 from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -88,6 +89,10 @@ _extract_semaphore = threading.BoundedSemaphore(_MAX_CONCURRENT_EXTRACTS)
 # by feeding it megabytes of `examples`. Enforced by middleware via
 # Content-Length so we reject before streaming the body into memory.
 _MAX_BODY_BYTES = max(1024, int(os.getenv("SCHEMABUILDER_MAX_BODY_BYTES") or 2_000_000))
+
+# Separate, much larger cap for document uploads — the body is a PDF/DOCX/
+# PPTX file, which routinely exceeds the JSON-payload cap. Default 50 MB.
+_MAX_DOC_BYTES = max(1024, int(os.getenv("SCHEMABUILDER_MAX_DOC_BYTES") or 50_000_000))
 
 # Strict allow-list for X-Request-ID: hex/ascii-safe so we don't propagate
 # header-injection junk into log lines or downstream tracers.
@@ -233,11 +238,17 @@ async def _enforce_body_size_limit(request: Request, call_next):
             n = int(cl)
         except ValueError:
             return Response(status_code=400, content="Invalid Content-Length")
-        if n > _MAX_BODY_BYTES:
+        # Document uploads have a separate, larger cap because PDFs are
+        # routinely larger than the JSON-payload limit.
+        if request.url.path == "/api/documents" and request.method == "POST":
+            limit = _MAX_DOC_BYTES
+        else:
+            limit = _MAX_BODY_BYTES
+        if n > limit:
             _metrics_inc("body_too_large")
             return Response(
                 status_code=413,
-                content=f"Request body exceeds {_MAX_BODY_BYTES} bytes",
+                content=f"Request body exceeds {limit} bytes",
             )
     return await call_next(request)
 
@@ -1776,6 +1787,146 @@ def list_documents(
         _doc_listing_cache = docs
         _doc_listing_signature = sig
     return _paginate(docs, limit, offset)
+
+
+_FILENAME_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_upload_filename(name: str) -> str:
+    """Strip directory components and unsafe characters from an uploaded
+    filename. The extension is preserved (lowercased) and validated against
+    SUPPORTED_EXTENSIONS by the caller.
+    """
+    # Take the basename only — `Path.name` is robust against both
+    # forward- and back-slash separators that a Windows client might send.
+    base = Path(name).name
+    stem = Path(base).stem
+    ext = Path(base).suffix.lower()
+    # Replace anything that isn't filename-safe with an underscore. We keep
+    # dots in the stem to a single trailing one removed below.
+    clean_stem = _FILENAME_SAFE_RE.sub("_", stem).strip("._-")
+    return (clean_stem or "document") + ext
+
+
+def _allocate_unique_path(directory: Path, filename: str) -> Path:
+    """Return a path inside `directory` that doesn't collide with existing
+    files; appends `-1`, `-2`, … to the stem until it's free.
+    """
+    stem = Path(filename).stem
+    ext = Path(filename).suffix
+    candidate = directory / filename
+    n = 1
+    while candidate.exists():
+        candidate = directory / f"{stem}-{n}{ext}"
+        n += 1
+    return candidate
+
+
+def _invalidate_doc_listing_cache() -> None:
+    """Drop the document listing + path caches after a mutation. The
+    signature-based cache would self-heal on the next request, but clearing
+    eagerly avoids a small window where the listing is stale right after
+    an upload/delete returns 200."""
+    global _doc_listing_cache, _doc_listing_signature
+    with _doc_listing_lock:
+        _doc_listing_cache = None
+        _doc_listing_signature = None
+    with _doc_path_cache_lock:
+        _doc_path_cache.clear()
+
+
+@app.post("/api/documents")
+async def upload_document(file: UploadFile = FastAPIFile(...)):
+    """Accept a PDF/DOCX/PPTX upload and persist it under TEST_DOCS_DIR.
+
+    Validates extension up-front; size is bounded by the body-size middleware
+    using a separate, larger cap for this path. A filename collision gets a
+    `-1`, `-2`, … suffix rather than overwriting an existing document, so an
+    accidental re-upload doesn't destroy an in-flight investigation.
+    """
+    raw = file.filename or "upload"
+    cleaned = _sanitize_upload_filename(raw)
+    ext = Path(cleaned).suffix
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                f"Unsupported file type {ext!r}. "
+                f"Allowed: {sorted(SUPPORTED_EXTENSIONS)}."
+            ),
+        )
+
+    TEST_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    target = _allocate_unique_path(TEST_DOCS_DIR, cleaned)
+
+    # Stream to a temp file in the same dir, enforce the size cap, then
+    # rename — avoids a partial file landing under the real name if the
+    # client disconnects or the body exceeds the cap.
+    tmp_fd, tmp_path_str = tempfile.mkstemp(
+        prefix=target.stem + ".", suffix=ext + ".part", dir=str(TEST_DOCS_DIR)
+    )
+    tmp_path = Path(tmp_path_str)
+    written = 0
+    try:
+        with os.fdopen(tmp_fd, "wb") as out:
+            while True:
+                chunk = await file.read(1 << 20)  # 1 MB
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _MAX_DOC_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload exceeds {_MAX_DOC_BYTES} bytes.",
+                    )
+                out.write(chunk)
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    _invalidate_doc_listing_cache()
+    doc_id = _get_document_id(target.name)
+    return {
+        "id": doc_id,
+        "filename": target.name,
+        "extension": ext,
+        "size": written,
+    }
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str):
+    """Remove a document from disk + flush every cache that referenced it.
+
+    Returns 404 if no document with that id exists, mirroring the rest of
+    the API. Render / text caches are pruned so a re-upload under the same
+    filename (which would yield the same doc_id) won't serve stale
+    rasterized pages from before the deletion.
+    """
+    filepath = _find_file(doc_id)
+    if not filepath:
+        raise HTTPException(status_code=404, detail="Document not found")
+    try:
+        filepath.unlink()
+    except OSError as e:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to delete document: {e}"
+        ) from e
+
+    # Purge every cache that keyed on this doc_id; otherwise a follow-up
+    # GET would either 200 from the listing cache or render a stale PNG.
+    # _ocr_decision_cache is keyed by (filename, file-signature) — clear
+    # whole-hog rather than scan, since deletes are infrequent and the
+    # cache rebuilds itself on the next extract.
+    _render_cache.pop(doc_id, None)
+    _text_cache.pop(doc_id, None)
+    _ocr_decision_cache.clear()
+    _invalidate_doc_listing_cache()
+    return {"id": doc_id, "deleted": True}
 
 
 @app.get("/api/documents/{doc_id}")

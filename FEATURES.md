@@ -77,3 +77,8 @@ Status: ideas captured 2026-05-11. Shipped on branch
   group 0 — becomes the extracted value, so an IBAN regex returns just
   the IBAN; Pydantic refuses uncompilable regexes at upload time and
   the editor surfaces compile errors live)
+- #8 Document upload (POST /api/documents writes to TEST_DOCS_DIR with
+  filename sanitization + collision suffix + a separate 50 MB body cap;
+  DELETE /api/documents/{id} purges the render/text caches so a re-
+  upload doesn't serve stale pages; sidebar gets an Upload button and
+  a trash-can per row)

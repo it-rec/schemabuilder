@@ -228,10 +228,25 @@
   }
 }
 
+.document-list__heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: spacing.$spacing-03;
+  margin-bottom: spacing.$spacing-04;
+}
+
 .document-list__heading {
   @include type.type-style("heading-compact-02");
   color: var(--cds-text-primary, #161616);
-  margin: 0 0 spacing.$spacing-04 0;
+  margin: 0;
+}
+
+.document-list__size-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: spacing.$spacing-02;
 }
 
 .document-list__items {

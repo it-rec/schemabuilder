@@ -21,6 +21,8 @@ import {
   exportTablesJson,
   exportTableCsv,
   getPageImageUrl,
+  uploadDocument,
+  deleteDocument,
 } from "./services/api";
 import "./App.scss";
 
@@ -185,6 +187,61 @@ export default function App() {
   const handleTeachEntry = useCallback((entry) => {
     setTeachEntry(entry);
   }, []);
+
+  const [uploading, setUploading] = useState(false);
+
+  const refreshDocuments = useCallback(async () => {
+    try {
+      const docs = await fetchDocuments();
+      setDocuments(docs);
+      return docs;
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+  }, []);
+
+  const handleUploadDocuments = useCallback(
+    async (files) => {
+      setUploading(true);
+      let lastUploaded = null;
+      try {
+        // Upload sequentially: the backend caps concurrent /extract calls, but
+        // serial uploads also surface per-file errors more cleanly than a
+        // Promise.all bulk reject.
+        for (const file of files) {
+          try {
+            lastUploaded = await uploadDocument(file);
+          } catch (err) {
+            console.error(`Upload of ${file.name} failed:`, err);
+          }
+        }
+      } finally {
+        setUploading(false);
+      }
+      const docs = await refreshDocuments();
+      if (lastUploaded?.id && docs?.some((d) => d.id === lastUploaded.id)) {
+        setSelectedDocId(lastUploaded.id);
+      }
+    },
+    [refreshDocuments],
+  );
+
+  const handleDeleteDocument = useCallback(
+    async (doc) => {
+      try {
+        await deleteDocument(doc.id);
+      } catch (err) {
+        console.error(err);
+        return;
+      }
+      const docs = await refreshDocuments();
+      if (selectedDocId === doc.id) {
+        setSelectedDocId(docs && docs.length > 0 ? docs[0].id : null);
+      }
+    },
+    [refreshDocuments, selectedDocId],
+  );
 
   const handleTeachSaved = useCallback(() => {
     setTeachEntry(null);
@@ -366,6 +423,9 @@ export default function App() {
               documents={documents}
               selectedId={selectedDocId}
               onSelect={handleSelect}
+              onUpload={handleUploadDocuments}
+              onDelete={handleDeleteDocument}
+              uploading={uploading}
             />
           </aside>
           <main

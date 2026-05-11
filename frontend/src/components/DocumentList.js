@@ -1,5 +1,7 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useRef } from "react";
 import {
+  Button,
+  IconButton,
   Search,
   StructuredListWrapper,
   StructuredListHead,
@@ -7,7 +9,13 @@ import {
   StructuredListCell,
   StructuredListBody,
 } from "@carbon/react";
-import { DocumentPdf, DocumentWordProcessor, PresentationFile } from "@carbon/react/icons";
+import {
+  DocumentPdf,
+  DocumentWordProcessor,
+  PresentationFile,
+  TrashCan,
+  Upload,
+} from "@carbon/react/icons";
 
 const ICON_MAP = {
   ".pdf": DocumentPdf,
@@ -21,8 +29,16 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function DocumentList({ documents, selectedId, onSelect }) {
+export default function DocumentList({
+  documents,
+  selectedId,
+  onSelect,
+  onUpload,
+  onDelete,
+  uploading,
+}) {
   const [query, setQuery] = useState("");
+  const fileInputRef = useRef(null);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -34,14 +50,65 @@ export default function DocumentList({ documents, selectedId, onSelect }) {
 
   const handleQueryChange = useCallback((e) => setQuery(e.target.value), []);
 
+  const handleUploadClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFilesPicked = useCallback(
+    (e) => {
+      const picked = Array.from(e.target.files || []);
+      // Reset so the same filename can be re-picked after a failed upload
+      // (the input only fires `change` on new selections).
+      e.target.value = "";
+      if (picked.length === 0 || !onUpload) return;
+      onUpload(picked);
+    },
+    [onUpload],
+  );
+
+  const handleDelete = useCallback(
+    (doc, event) => {
+      event.stopPropagation();
+      // eslint-disable-next-line no-alert
+      if (!window.confirm(`Delete "${doc.filename}"?`)) return;
+      onDelete?.(doc);
+    },
+    [onDelete],
+  );
+
   return (
     <section className="document-list" aria-labelledby="document-list-heading">
-      <h2
-        id="document-list-heading"
-        className="document-list__heading"
-      >
-        Documents
-      </h2>
+      <div className="document-list__heading-row">
+        <h2
+          id="document-list-heading"
+          className="document-list__heading"
+        >
+          Documents
+        </h2>
+        {onUpload && (
+          <>
+            <Button
+              kind="ghost"
+              size="sm"
+              renderIcon={Upload}
+              onClick={handleUploadClick}
+              disabled={!!uploading}
+              data-testid="upload-button"
+            >
+              {uploading ? "Uploading…" : "Upload"}
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.docx,.pptx"
+              multiple
+              onChange={handleFilesPicked}
+              style={{ display: "none" }}
+              data-testid="upload-input"
+            />
+          </>
+        )}
+      </div>
       <Search
         size="md"
         placeholder="Search documents..."
@@ -87,7 +154,22 @@ export default function DocumentList({ documents, selectedId, onSelect }) {
                     <span>{doc.filename}</span>
                   </span>
                 </StructuredListCell>
-                <StructuredListCell>{formatSize(doc.size)}</StructuredListCell>
+                <StructuredListCell>
+                  <span className="document-list__size-row">
+                    <span>{formatSize(doc.size)}</span>
+                    {onDelete && (
+                      <IconButton
+                        label={`Delete ${doc.filename}`}
+                        kind="ghost"
+                        size="sm"
+                        onClick={(e) => handleDelete(doc, e)}
+                        data-testid={`doc-delete-${doc.id}`}
+                      >
+                        <TrashCan />
+                      </IconButton>
+                    )}
+                  </span>
+                </StructuredListCell>
               </StructuredListRow>
             );
           })}

@@ -56,3 +56,68 @@ test("shows empty message when no documents match search", async () => {
   await user.type(search, "nonexistent");
   expect(screen.getByText("No documents found.")).toBeInTheDocument();
 });
+
+test("upload button is hidden when onUpload is not provided", () => {
+  render(
+    <DocumentList documents={mockDocs} selectedId={null} onSelect={() => {}} />,
+  );
+  expect(screen.queryByTestId("upload-button")).not.toBeInTheDocument();
+});
+
+test("upload button forwards picked files to onUpload", () => {
+  const onUpload = jest.fn();
+  render(
+    <DocumentList
+      documents={mockDocs}
+      selectedId={null}
+      onSelect={() => {}}
+      onUpload={onUpload}
+    />,
+  );
+
+  const input = screen.getByTestId("upload-input");
+  const fileA = new File([new Uint8Array(8)], "a.pdf", { type: "application/pdf" });
+  const fileB = new File([new Uint8Array(4)], "b.docx", {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+  fireEvent.change(input, { target: { files: [fileA, fileB] } });
+
+  expect(onUpload).toHaveBeenCalledTimes(1);
+  expect(onUpload.mock.calls[0][0].map((f) => f.name)).toEqual(["a.pdf", "b.docx"]);
+});
+
+test("delete icon prompts then calls onDelete with the doc", () => {
+  jest.spyOn(window, "confirm").mockImplementation(() => true);
+  const onDelete = jest.fn();
+  const onSelect = jest.fn();
+  render(
+    <DocumentList
+      documents={mockDocs}
+      selectedId={null}
+      onSelect={onSelect}
+      onDelete={onDelete}
+    />,
+  );
+  fireEvent.click(screen.getByTestId("doc-delete-abc"));
+  expect(window.confirm).toHaveBeenCalled();
+  expect(onDelete).toHaveBeenCalledWith(mockDocs[0]);
+  // Click on the trash button must NOT bubble up to the row's onSelect.
+  expect(onSelect).not.toHaveBeenCalled();
+  window.confirm.mockRestore();
+});
+
+test("delete is skipped when the confirm dialog is cancelled", () => {
+  jest.spyOn(window, "confirm").mockImplementation(() => false);
+  const onDelete = jest.fn();
+  render(
+    <DocumentList
+      documents={mockDocs}
+      selectedId={null}
+      onSelect={() => {}}
+      onDelete={onDelete}
+    />,
+  );
+  fireEvent.click(screen.getByTestId("doc-delete-abc"));
+  expect(onDelete).not.toHaveBeenCalled();
+  window.confirm.mockRestore();
+});

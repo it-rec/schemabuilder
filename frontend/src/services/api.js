@@ -128,6 +128,42 @@ async function request(path, {
   throw lastError || new Error(errorFallback);
 }
 
+// Upload a document file. Doesn't go through the JSON request() helper
+// because the body is multipart and we don't want a JSON Content-Type
+// header overriding the multipart boundary fetch sets automatically.
+// Allow more time than the default GET budget — large PDFs take a while
+// to stream up over typical connections.
+export async function uploadDocument(file, { signal } = {}) {
+  const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/api/documents`, {
+    method: "POST",
+    body: form,
+    signal,
+  });
+  if (!res.ok) {
+    let msg = "Failed to upload document";
+    try {
+      const body = await res.json();
+      if (body?.detail) msg = body.detail;
+    } catch (_) {
+      /* not JSON */
+    }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+export async function deleteDocument(docId, { signal } = {}) {
+  const res = await request(`/api/documents/${docId}`, {
+    method: "DELETE",
+    signal,
+    errorFallback: "Failed to delete document",
+  });
+  return res.json();
+}
+
 export async function fetchDocuments({ signal } = {}) {
   const res = await request("/api/documents", {
     signal,
