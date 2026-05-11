@@ -93,3 +93,8 @@ Status: ideas captured 2026-05-11. Shipped on branch
   cancels after the current document. UI: "Run all" button in the
   sidebar, modal with a ProgressBar + cancel + JSON download of the
   aggregated results)
+- #6 SQLite extraction cache (full /extract response cached on
+  doc-signature + matcher-relevant definition hash; target_tables
+  edits don't invalidate; survives restarts; `?refresh=true` bypass;
+  delete-doc invalidates by signature; bounded by an LRU on
+  created_at)

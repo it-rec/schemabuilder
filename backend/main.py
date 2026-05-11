@@ -28,6 +28,12 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from extraction_cache import (
+    get_default_cache as _get_extraction_cache,
+)
+from extraction_cache import (
+    make_key as _make_extraction_cache_key,
+)
 from transforms import TransformError, build_export
 
 # Per-request context variable, surfaced into log records via the filter below
@@ -422,6 +428,10 @@ _metrics: dict = {
     "ocr_decisions_on": 0,
     "ocr_decisions_off": 0,
     "extractions_completed": 0,
+    # SQLite extraction-cache stats. Hit rate ~= "how often /extract
+    # returned a cached response" — useful for tuning the cache size.
+    "extractions_cache_hits": 0,
+    "extractions_cache_misses": 0,
     # Incremented when a request is rejected because the global concurrency
     # cap is full. A non-zero rate here is a signal to bump
     # SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS or scale the process out.
@@ -1924,6 +1934,10 @@ def delete_document(doc_id: str):
     filepath = _find_file(doc_id)
     if not filepath:
         raise HTTPException(status_code=404, detail="Document not found")
+    # Capture the file signature BEFORE deleting so the extraction-cache
+    # invalidation can find rows for this doc; once the file is gone,
+    # _file_signature() returns the directory-fallback tuple.
+    doc_sig = _file_signature(filepath)
     try:
         filepath.unlink()
     except OSError as e:
@@ -1935,10 +1949,16 @@ def delete_document(doc_id: str):
     # GET would either 200 from the listing cache or render a stale PNG.
     # _ocr_decision_cache is keyed by (filename, file-signature) — clear
     # whole-hog rather than scan, since deletes are infrequent and the
-    # cache rebuilds itself on the next extract.
+    # cache rebuilds itself on the next extract. The SQLite extraction
+    # cache is invalidated by signature so other documents' cached
+    # extractions survive.
     _render_cache.pop(doc_id, None)
     _text_cache.pop(doc_id, None)
     _ocr_decision_cache.clear()
+    try:
+        _get_extraction_cache().invalidate_by_doc_signature(doc_sig)
+    except Exception:
+        logger.exception("Failed to invalidate extraction cache for %s", doc_id)
     _invalidate_doc_listing_cache()
     return {"id": doc_id, "deleted": True}
 
@@ -2352,7 +2372,11 @@ def add_field_example(def_id: str, field_name: str, body: FieldExampleBody):
 
 
 @app.post("/api/documents/{doc_id}/extract")
-def extract_fields(doc_id: str, body: ExtractRequest):
+def extract_fields(
+    doc_id: str,
+    body: ExtractRequest,
+    refresh: bool = Query(False, description="Bypass the extraction cache."),
+):
     """Extract fields from a document using a definition.
 
     Sync `def` (not async) so FastAPI dispatches this to the threadpool;
@@ -2362,6 +2386,9 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     Tracked via `_track_inflight` so a SIGTERM during a long extraction
     waits for completion (bounded by SCHEMABUILDER_SHUTDOWN_GRACE) instead
     of killing the Docling pipeline mid-run.
+
+    Cached on (doc_signature, matching-relevant definition fields). The
+    cache survives restarts via SQLite. Pass ?refresh=true to bypass.
     """
     filepath = _find_file(doc_id)
     if not filepath:
@@ -2371,56 +2398,86 @@ def extract_fields(doc_id: str, body: ExtractRequest):
     defs = _load_definitions()
     if def_id not in defs:
         raise HTTPException(status_code=404, detail="Definition not found")
+    definition = defs[def_id]
 
-    # Bounded semaphore prevents pile-on: Docling pipelines hold large model
-    # state and serialize internally, so admitting unlimited concurrent
-    # extractions just queues them while burning RSS. Reject fast with 503
-    # so clients (and any upstream LB) can back off / shed.
-    if not _extract_semaphore.acquire(blocking=False):
-        _metrics_inc("extractions_rejected")
-        raise HTTPException(
-            status_code=503,
-            detail="Too many concurrent extractions; retry shortly.",
-            headers={"Retry-After": "5"},
-        )
-    try:
-        with _track_inflight():
-            text_data = _get_or_extract_text(filepath)
-            definition = defs[def_id]
-            fields = _extract_fields(definition, text_data["text_entries"], def_id=def_id)
-            _metrics_inc("extractions_completed")
-    finally:
-        _extract_semaphore.release()
+    # Cache lookup. The key composes the file signature (so a re-upload
+    # under the same name invalidates) with a hash of the matcher-relevant
+    # subset of the definition (so an edit to examples / pattern /
+    # min_confidence invalidates, but an edit to target_tables doesn't).
+    doc_sig = _file_signature(filepath)
+    cache = _get_extraction_cache()
+    cache_key = _make_extraction_cache_key(doc_sig, definition)
+    cache_hit = False
+    response: Optional[dict] = None
+    if not refresh:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            response = cached
+            cache_hit = True
+            _metrics_inc("extractions_cache_hits")
 
-    # Expose target table names (not the full schema) so the frontend can
-    # render an Export menu without re-fetching the definition. Kept name-only
-    # to stay cheap and avoid leaking transform internals to the client.
-    target_table_names = [
-        t.get("name")
-        for t in (definition.get("target_tables") or [])
-        if isinstance(t, dict) and t.get("name")
-    ]
-    response: dict = {
-        "document_id": doc_id,
-        "definition_id": def_id,
-        "document_type": definition.get("document", {}).get("document_type", ""),
-        "document_description": definition.get("document", {}).get("document_description", ""),
-        "fields": fields,
-        "page_dimensions": text_data["page_dimensions"],
-        "target_tables": target_table_names,
-        # Full text entry list so the frontend can offer "click to teach as
-        # an example" against any extracted block, not just the ones we
-        # already matched. Cheap to include — it's already computed and
-        # cached for this call.
-        "text_entries": text_data.get("text_entries", []),
-    }
-    # Surface a failure from the Docling pipeline so the frontend can tell
-    # "no matches because nothing matched" apart from "no matches because
-    # extraction errored". The fields list is still returned (empty matches)
-    # so the UI can render its empty state coherently.
-    if text_data.get("extraction_error"):
-        response["extraction_error"] = text_data["extraction_error"]
-    return response
+    if response is None:
+        # Bounded semaphore prevents pile-on: Docling pipelines hold large
+        # model state and serialize internally, so admitting unlimited
+        # concurrent extractions just queues them while burning RSS. Reject
+        # fast with 503 so clients (and any upstream LB) can back off /
+        # shed.
+        if not _extract_semaphore.acquire(blocking=False):
+            _metrics_inc("extractions_rejected")
+            raise HTTPException(
+                status_code=503,
+                detail="Too many concurrent extractions; retry shortly.",
+                headers={"Retry-After": "5"},
+            )
+        try:
+            with _track_inflight():
+                text_data = _get_or_extract_text(filepath)
+                fields = _extract_fields(
+                    definition, text_data["text_entries"], def_id=def_id
+                )
+                _metrics_inc("extractions_completed")
+                _metrics_inc("extractions_cache_misses")
+        finally:
+            _extract_semaphore.release()
+
+        target_table_names = [
+            t.get("name")
+            for t in (definition.get("target_tables") or [])
+            if isinstance(t, dict) and t.get("name")
+        ]
+        response = {
+            "document_id": doc_id,
+            "definition_id": def_id,
+            "document_type": definition.get("document", {}).get("document_type", ""),
+            "document_description": definition.get("document", {}).get(
+                "document_description", ""
+            ),
+            "fields": fields,
+            "page_dimensions": text_data["page_dimensions"],
+            "target_tables": target_table_names,
+            # Full text entry list so the frontend can offer "click to
+            # teach as an example" against any extracted block. Cheap to
+            # include — already computed.
+            "text_entries": text_data.get("text_entries", []),
+        }
+        if text_data.get("extraction_error"):
+            response["extraction_error"] = text_data["extraction_error"]
+        # Skip caching when extraction errored — the user almost always
+        # wants a fresh attempt next time, not a frozen failure.
+        if not text_data.get("extraction_error"):
+            cacheable = dict(response)
+            # Stash the doc signature on the cached payload so the cache
+            # can invalidate-by-signature on document delete without
+            # reversing the hash.
+            cacheable["_doc_signature"] = list(doc_sig)
+            cache.put(cache_key, cacheable)
+
+    # Always echo the cache state so clients can show "cached" badges /
+    # offer a refresh action. Stripped from the SQLite-stored payload.
+    out = dict(response)
+    out.pop("_doc_signature", None)
+    out["cache_hit"] = cache_hit
+    return out
 
 
 def _csv_response(table_name: str, rows: list[dict], filename_stem: str) -> Response:
