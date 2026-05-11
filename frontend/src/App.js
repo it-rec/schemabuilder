@@ -472,8 +472,8 @@ export default function App() {
   return (
     <Theme theme={theme}>
       <div className="app-shell" inert={offline ? "" : undefined}>
-      <Header aria-label="IBM Schema Builder">
-        <HeaderName prefix="IBM" href="#" onClick={(e) => e.preventDefault()}>
+      <Header aria-label="Schema Builder">
+        <HeaderName prefix="" href="#" onClick={(e) => e.preventDefault()}>
           Schema Builder
         </HeaderName>
         <HeaderGlobalBar>
@@ -488,7 +488,7 @@ export default function App() {
         </HeaderGlobalBar>
       </Header>
       <Content className="app-content">
-        <h1 className="cds--visually-hidden">IBM Schema Builder</h1>
+        <h1 className="cds--visually-hidden">Schema Builder</h1>
         <div className="app-layout">
           <aside
             className="app-layout__sidebar"
