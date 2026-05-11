@@ -366,6 +366,17 @@ _pdf_conversion_cache: "OrderedDict[tuple, str]" = OrderedDict()
 _pdf_conversion_lock = threading.Lock()
 _pdf_temp_dir = tempfile.mkdtemp(prefix="schemabuilder_")
 
+# pypdfium2 wraps PDFium, whose C library shares process-global state and is
+# NOT thread-safe — concurrent calls from different threads (even on separate
+# PdfDocument instances) can read freed pointers and crash with
+# `OSError: exception: access violation reading 0x0`. Docling's PDF backend
+# uses pypdfium2 internally too, so this lock has to cover both our direct
+# call sites (_open_pdf_metadata / _render_single_page / _document_needs_ocr)
+# AND Docling `convert(...)` calls on .pdf inputs. DOCX/PPTX go through
+# Docling's SimplePipeline, which doesn't touch pdfium, so those extractions
+# stay outside the lock and keep their parallelism.
+_pdfium_lock = threading.Lock()
+
 
 def _evict_pdf_file(_key, path_str: str) -> None:
     """Eviction callback for the PDF-conversion LRU: remove the on-disk PDF."""
@@ -568,18 +579,19 @@ def _open_pdf_metadata(filepath: Path) -> tuple[Optional[Path], int, dict]:
     if not pdf_path or not pdf_path.exists():
         return None, 0, {}
 
-    pdf_doc = pdfium.PdfDocument(str(pdf_path))
-    try:
-        num_pages = len(pdf_doc)
-        page_dimensions = {}
-        for i in range(num_pages):
-            page = pdf_doc[i]
-            page_dimensions[i + 1] = {
-                "width": float(page.get_width()),
-                "height": float(page.get_height()),
-            }
-    finally:
-        pdf_doc.close()
+    with _pdfium_lock:
+        pdf_doc = pdfium.PdfDocument(str(pdf_path))
+        try:
+            num_pages = len(pdf_doc)
+            page_dimensions = {}
+            for i in range(num_pages):
+                page = pdf_doc[i]
+                page_dimensions[i + 1] = {
+                    "width": float(page.get_width()),
+                    "height": float(page.get_height()),
+                }
+        finally:
+            pdf_doc.close()
 
     return pdf_path, num_pages, page_dimensions
 
@@ -587,18 +599,19 @@ def _open_pdf_metadata(filepath: Path) -> tuple[Optional[Path], int, dict]:
 def _render_single_page(pdf_path: str, page_no: int) -> Optional[bytes]:
     import pypdfium2 as pdfium
 
-    pdf_doc = pdfium.PdfDocument(pdf_path)
-    try:
-        if page_no < 1 or page_no > len(pdf_doc):
-            return None
-        page = pdf_doc[page_no - 1]
-        bitmap = page.render(scale=2.0)
-        pil_image = bitmap.to_pil()
-        buf = io.BytesIO()
-        pil_image.save(buf, format="PNG")
-        return buf.getvalue()
-    finally:
-        pdf_doc.close()
+    with _pdfium_lock:
+        pdf_doc = pdfium.PdfDocument(pdf_path)
+        try:
+            if page_no < 1 or page_no > len(pdf_doc):
+                return None
+            page = pdf_doc[page_no - 1]
+            bitmap = page.render(scale=2.0)
+            pil_image = bitmap.to_pil()
+            buf = io.BytesIO()
+            pil_image.save(buf, format="PNG")
+            return buf.getvalue()
+        finally:
+            pdf_doc.close()
 
 
 def _resolve_accelerator_device(AcceleratorDevice):
@@ -904,43 +917,44 @@ def _document_needs_ocr(filepath: Path) -> bool:
 
     import pypdfium2 as pdfium
 
-    try:
-        pdf_doc = pdfium.PdfDocument(str(filepath))
-    except Exception:
-        # If we can't open it for sampling we can't extract from it anyway;
-        # take the fast path and let docling surface whatever error occurs.
-        return False
-
-    try:
-        n_pages = len(pdf_doc)
-        if n_pages == 0:
+    with _pdfium_lock:
+        try:
+            pdf_doc = pdfium.PdfDocument(str(filepath))
+        except Exception:
+            # If we can't open it for sampling we can't extract from it anyway;
+            # take the fast path and let docling surface whatever error occurs.
             return False
 
-        if n_pages <= _OCR_DETECT_SAMPLE_PAGES:
-            sample = list(range(n_pages))
-        else:
-            # First, middle, last — covers cover-only-image cases and trailing
-            # appendices that may differ from the body.
-            sample = sorted({0, n_pages // 2, n_pages - 1})
-
-        total_chars = 0
-        for i in sample:
-            page = pdf_doc[i]
-            textpage = None
-            try:
-                textpage = page.get_textpage()
-                text = textpage.get_text_range()
-            except Exception:
-                text = ""
-            finally:
-                if textpage is not None:
-                    textpage.close()
-            total_chars += len((text or "").strip())
-            if total_chars >= _OCR_DETECT_FAST_EXIT_CHARS:
+        try:
+            n_pages = len(pdf_doc)
+            if n_pages == 0:
                 return False
-        return total_chars < _OCR_DETECT_MIN_CHARS
-    finally:
-        pdf_doc.close()
+
+            if n_pages <= _OCR_DETECT_SAMPLE_PAGES:
+                sample = list(range(n_pages))
+            else:
+                # First, middle, last — covers cover-only-image cases and trailing
+                # appendices that may differ from the body.
+                sample = sorted({0, n_pages // 2, n_pages - 1})
+
+            total_chars = 0
+            for i in sample:
+                page = pdf_doc[i]
+                textpage = None
+                try:
+                    textpage = page.get_textpage()
+                    text = textpage.get_text_range()
+                except Exception:
+                    text = ""
+                finally:
+                    if textpage is not None:
+                        textpage.close()
+                total_chars += len((text or "").strip())
+                if total_chars >= _OCR_DETECT_FAST_EXIT_CHARS:
+                    return False
+            return total_chars < _OCR_DETECT_MIN_CHARS
+        finally:
+            pdf_doc.close()
 
 
 def _resolve_ocr_decision(filepath: Path) -> bool:
@@ -1086,7 +1100,15 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
     """
     do_ocr = _resolve_ocr_decision(filepath)
     converter = _get_text_converter(do_ocr=do_ocr)
-    result = converter.convert(str(filepath))
+    # PDF pipeline uses pypdfium2 inside Docling; serialize against our own
+    # pdfium call sites (renders, metadata, OCR sampling) to keep PDFium's
+    # process-global state safe. DOCX/PPTX use SimplePipeline → no pdfium →
+    # no lock needed, so they keep running concurrently with PDF work.
+    if filepath.suffix.lower() == ".pdf":
+        with _pdfium_lock:
+            result = converter.convert(str(filepath))
+    else:
+        result = converter.convert(str(filepath))
     doc = result.document
 
     text_entries = []
