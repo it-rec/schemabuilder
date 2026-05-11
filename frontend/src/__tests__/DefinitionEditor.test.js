@@ -71,6 +71,42 @@ test("create flow: blocks save when document type is empty", async () => {
   await waitFor(() => expect(createButton).not.toBeDisabled());
 });
 
+test("edit flow: hydrates min_confidence + round-trips it as 0-1 on save", async () => {
+  const user = userEvent.setup();
+  api.fetchDefinition.mockResolvedValue({
+    document: {
+      document_type: "Invoice",
+      fields: [
+        { name: "vendor", min_confidence: 0.75 },
+      ],
+    },
+  });
+  api.updateDefinition.mockResolvedValue({ id: "invoice" });
+
+  render(
+    <DefinitionEditor
+      open
+      mode="edit"
+      definitionId="invoice"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  // 0.75 should hydrate to 75 in the UI.
+  const input = await screen.findByLabelText(/Match threshold/i);
+  expect(input).toHaveValue(75);
+
+  await user.clear(input);
+  await user.type(input, "90");
+  await user.click(screen.getByRole("button", { name: /Save changes/i }));
+
+  await waitFor(() => expect(api.updateDefinition).toHaveBeenCalledTimes(1));
+  const [, payload] = api.updateDefinition.mock.calls[0];
+  expect(payload.document.fields[0].min_confidence).toBe(0.9);
+});
+
 test("edit flow: hydrates from fetched definition and preserves extras on save", async () => {
   const user = userEvent.setup();
   const remote = {

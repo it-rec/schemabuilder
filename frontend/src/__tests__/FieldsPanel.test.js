@@ -157,6 +157,77 @@ test("export menu is hidden when no target_tables are present", () => {
   expect(screen.queryByTestId("export-menu")).not.toBeInTheDocument();
 });
 
+test("renders threshold tag when min_confidence is set on the field", () => {
+  const withThreshold = {
+    ...mockExtraction,
+    fields: [
+      {
+        ...mockExtraction.fields[0],
+        min_confidence: 0.75,
+      },
+      ...mockExtraction.fields.slice(1),
+    ],
+  };
+  render(
+    <FieldsPanel
+      extraction={withThreshold}
+      onHoverField={() => {}}
+      loading={false}
+    />,
+  );
+  expect(screen.getByTestId("field-threshold-invoice_id")).toHaveTextContent(
+    "≥75%",
+  );
+});
+
+test("renders rejected-candidate review hint when below threshold", () => {
+  const withRejected = {
+    ...mockExtraction,
+    fields: [
+      {
+        name: "vendor",
+        description: "vendor name",
+        extracted_value: null,
+        confidence: 0,
+        matched_entry_id: null,
+        page: null,
+        bbox: null,
+        examples: [],
+        min_confidence: 0.9,
+        rejected_candidate: {
+          text: "ACME Corp.",
+          score: 65,
+          confidence: 0.65,
+          page: 1,
+        },
+      },
+    ],
+  };
+  render(
+    <FieldsPanel
+      extraction={withRejected}
+      onHoverField={() => {}}
+      loading={false}
+    />,
+  );
+  const hint = screen.getByTestId("rejected-vendor");
+  expect(hint).toHaveTextContent("ACME Corp.");
+  expect(hint).toHaveTextContent("65%");
+  expect(hint).toHaveTextContent("p.1");
+});
+
+test("does not render rejected-candidate hint when the field matched", () => {
+  // invoice_id matched in the base mock — there should be no review hint.
+  render(
+    <FieldsPanel
+      extraction={mockExtraction}
+      onHoverField={() => {}}
+      loading={false}
+    />,
+  );
+  expect(screen.queryByTestId("rejected-invoice_id")).not.toBeInTheDocument();
+});
+
 test("export menu surfaces JSON + per-table CSV options and calls onExport", async () => {
   const onExport = jest.fn();
   const extractionWithTables = {

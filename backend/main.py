@@ -1407,6 +1407,17 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             best_match = entry
             best_reason = reason
 
+    # Per-field acceptance threshold (0–1). Defaults to 0.5 to preserve the
+    # historical 50/100 cutoff. A definition can raise it (strict fields like
+    # invoice_id) or lower it (fuzzy fields like vendor names). Anything that
+    # isn't a finite number in range is clamped to the default; we never want
+    # a typo in the JSON to turn off matching entirely.
+    raw_threshold = field.get("min_confidence")
+    if isinstance(raw_threshold, (int, float)) and 0.0 <= raw_threshold <= 1.0:
+        score_cutoff = int(raw_threshold * 100)
+    else:
+        score_cutoff = 50
+
     result = {
         "name": field["name"],
         "description": field.get("description", ""),
@@ -1414,6 +1425,9 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         "extraction_instructions": field.get("extraction_instructions"),
         "available_options": field.get("available_options"),
         "affix": field.get("affix"),
+        "min_confidence": raw_threshold
+        if isinstance(raw_threshold, (int, float)) and 0.0 <= raw_threshold <= 1.0
+        else None,
         "extracted_value": None,
         "confidence": 0,
         "matched_entry_id": None,
@@ -1424,9 +1438,14 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         # when nothing scored above threshold.
         "match_reason": None,
         "match_score": 0,
+        # When the best candidate scored below the field's threshold, surface
+        # its text so the user can decide whether to lower the threshold or
+        # teach a new example. This is observability, not a match — the
+        # field's extracted_value stays None.
+        "rejected_candidate": None,
     }
 
-    if best_match and best_score >= 50:
+    if best_match and best_score >= score_cutoff:
         used_ids.add(best_match["id"])
         result["extracted_value"] = best_match["text"]
         result["confidence"] = best_score / 100.0
@@ -1435,6 +1454,15 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         result["bbox"] = best_match.get("bbox")
         result["match_reason"] = best_reason
         result["match_score"] = best_score
+    elif best_match and best_score > 0:
+        # Below threshold but non-zero: surface the rejected candidate so the
+        # UI can offer a "review — was this the right value?" prompt.
+        result["rejected_candidate"] = {
+            "text": best_match["text"],
+            "score": best_score,
+            "confidence": best_score / 100.0,
+            "page": best_match.get("page"),
+        }
 
     return result
 
@@ -1862,6 +1890,11 @@ class FieldSpec(BaseModel):
     examples: Optional[List[Any]] = None
     available_options: Optional[List[Any]] = None
     affix: Optional[bool] = None
+    # Per-field acceptance threshold for the matcher. 0–1 inclusive. When
+    # None the matcher falls back to its historical 0.5 cutoff. Validated
+    # here so a malformed value lands as a 422 instead of getting silently
+    # ignored inside the matcher.
+    min_confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     fields: Optional[List["FieldSpec"]] = None
 
 

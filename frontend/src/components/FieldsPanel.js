@@ -191,6 +191,16 @@ const FieldItem = React.memo(function FieldItem({
           )}
           <span className="fields-panel__field-name">{fieldLabel}</span>
           {!isArray && <ConfidenceIndicator confidence={field.confidence || 0} />}
+          {!isArray && typeof field.min_confidence === "number" && (
+            <Tag
+              size="sm"
+              type="gray"
+              title="Per-field confidence threshold"
+              data-testid={`field-threshold-${field.name}`}
+            >
+              ≥{Math.round(field.min_confidence * 100)}%
+            </Tag>
+          )}
           {isArray && hasItems && (
             <Tag size="sm" type="blue">
               {field.items.length} item{field.items.length !== 1 ? "s" : ""}
@@ -212,6 +222,28 @@ const FieldItem = React.memo(function FieldItem({
         {!isArray && !hasValue && (
           <div className="fields-panel__field-value fields-panel__field-value--empty">
             <span className="fields-panel__field-value-text">Not found</span>
+          </div>
+        )}
+
+        {!isArray && !hasValue && field.rejected_candidate && (
+          <div
+            className="fields-panel__rejected"
+            data-testid={`rejected-${field.name}`}
+            role="note"
+          >
+            <WarningFilled
+              size={12}
+              className="fields-panel__rejected-icon"
+              aria-hidden="true"
+            />
+            <span className="fields-panel__rejected-text">
+              Below threshold:{" "}
+              <strong>&ldquo;{field.rejected_candidate.text}&rdquo;</strong>{" "}
+              ({Math.round(field.rejected_candidate.confidence * 100)}%)
+              {field.rejected_candidate.page
+                ? ` — p.${field.rejected_candidate.page}`
+                : ""}
+            </span>
           </div>
         )}
 

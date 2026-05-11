@@ -9,6 +9,7 @@ import {
   ModalBody,
   ModalFooter,
   ModalHeader,
+  NumberInput,
   TextArea,
   TextInput,
 } from "@carbon/react";
@@ -37,6 +38,10 @@ const EMPTY_FIELD = Object.freeze({
   examples: [],
   available_options: [],
   affix: false,
+  // Per-field acceptance threshold (0–100 in the UI, 0–1 in the JSON). null
+  // means "use server default (50%)" so a freshly created field doesn't
+  // bake a specific value into the JSON.
+  min_confidence_pct: null,
   fields: [],
 });
 
@@ -53,6 +58,15 @@ function pruneField(field) {
   if (field.available_options?.length)
     out.available_options = field.available_options.slice();
   if (field.affix) out.affix = true;
+  // Only emit min_confidence when the user actually set one. Convert from
+  // the 0–100 UI value back to the 0–1 backend value, clamped to range.
+  if (
+    field.min_confidence_pct != null &&
+    Number.isFinite(field.min_confidence_pct)
+  ) {
+    const clamped = Math.max(0, Math.min(100, field.min_confidence_pct));
+    out.min_confidence = clamped / 100;
+  }
   if (field.type === "array" && field.fields?.length)
     out.fields = field.fields.map(pruneField);
   return out;
@@ -72,6 +86,10 @@ function hydrateField(raw) {
       ? raw.available_options.map(String)
       : [],
     affix: !!raw?.affix,
+    min_confidence_pct:
+      typeof raw?.min_confidence === "number"
+        ? Math.round(raw.min_confidence * 100)
+        : null,
     fields: Array.isArray(raw?.fields) ? raw.fields.map(hydrateField) : [],
   };
 }
@@ -273,6 +291,26 @@ function FieldEditor({ field, path, onChange, onRemove, depth = 0 }) {
             labelText="Affix (e.g. currency sign — match as prefix/suffix of nearby text)"
             checked={field.affix}
             onChange={(_, { checked }) => update({ affix: checked })}
+          />
+          <NumberInput
+            id={`def-field-threshold-${path}`}
+            label="Match threshold (%)"
+            helperText="Reject matches below this score. Empty = use the default (50%)."
+            min={0}
+            max={100}
+            step={5}
+            allowEmpty
+            value={field.min_confidence_pct ?? ""}
+            onChange={(_e, { value }) => {
+              // Carbon emits a string (or number) here; "" means cleared.
+              if (value === "" || value == null) {
+                update({ min_confidence_pct: null });
+              } else {
+                const n = Number(value);
+                update({ min_confidence_pct: Number.isFinite(n) ? n : null });
+              }
+            }}
+            size="sm"
           />
         </>
       )}

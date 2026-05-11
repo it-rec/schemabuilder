@@ -68,3 +68,7 @@ Status: ideas captured 2026-05-11. Shipped on branch
 - #3 Bounding-box overlay (persistent ghost overlays for every match,
   reverse hover into FieldsPanel, label on active)
 - #4 Target-table export (transform engine + JSON/CSV download)
+- #9 Per-field confidence thresholds (`min_confidence` 0–1 on each
+  field overrides the default 0.5 cutoff; the editor exposes it as a
+  percent input; sub-threshold candidates surface as a "review" hint
+  in the panel instead of being silently dropped)
