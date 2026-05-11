@@ -824,7 +824,17 @@ def _warm_up_converter():
     request finds the models already resident on-device.
     """
     try:
-        from docling.datamodel.base_models import InputFormat
+        # `InputFormat` moved between submodules across docling releases
+        # (base_models on 2.14, sometimes re-exported from docling.datamodel
+        # or the top-level package on newer builds). Try the known locations
+        # in turn so warm-up survives version drift.
+        try:
+            from docling.datamodel.base_models import InputFormat
+        except ImportError:
+            try:
+                from docling.datamodel import InputFormat  # type: ignore
+            except ImportError:
+                from docling import InputFormat  # type: ignore
 
         cv = _get_text_converter(do_ocr=False)
         t0 = time.perf_counter()
