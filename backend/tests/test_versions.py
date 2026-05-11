@@ -99,12 +99,23 @@ def test_get_version_with_malformed_id_returns_404(client):
         assert resp.status_code == 404, bad
 
 
-def test_versions_endpoint_for_unknown_definition_returns_empty_list(client):
-    """A definition that never existed has no version dir — list returns
-    empty rather than 404, mirroring how an empty list endpoint works."""
-    resp = client.get("/api/definitions/nope/versions")
+def test_versions_endpoint_returns_404_for_unknown_definition(client):
+    """A definition that never existed (no live file, no archive) is a
+    typo — return 404 so the caller can distinguish that from a live
+    definition with empty history. A *deleted* definition still has
+    archived versions and returns 200 (covered by the
+    test_delete_archives_the_previous_version round-trip)."""
+    resp = client.get("/api/definitions/never_existed/versions")
+    assert resp.status_code == 404
+
+
+def test_versions_endpoint_returns_200_for_deleted_def_with_history(client):
+    """Deleted definitions are browsable via history (for resurrection)."""
+    client.post("/api/definitions", json=_def("Test", [{"name": "x"}]))
+    client.delete("/api/definitions/test")
+    resp = client.get("/api/definitions/test/versions")
     assert resp.status_code == 200
-    assert resp.json()["items"] == []
+    assert any(v["action"] == "delete" for v in resp.json()["items"])
 
 
 def test_restore_round_trip_via_patch(client):

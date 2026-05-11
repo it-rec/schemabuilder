@@ -180,6 +180,33 @@ def test_cancel_unknown_job_returns_404(client):
     assert client.delete("/api/extract/batch/nope").status_code == 404
 
 
+def test_public_view_returns_detached_dicts(client):
+    """Regression for the torn-dict race: `_public_batch_view` must
+    snapshot `results` / `errors` so the worker can keep mutating the
+    live job dict while FastAPI iterates the response. Without the
+    `dict(...)` shallow copy, this raises RuntimeError when iterated
+    while mutated."""
+    job = {
+        "id": "j1",
+        "definition_id": "d",
+        "document_ids": ["a"],
+        "status": "running",
+        "total": 1,
+        "completed": 0,
+        "results": {"a": {"ok": True}},
+        "errors": {},
+        "started_at": 0.0,
+        "completed_at": None,
+        "_cancelled": __import__("threading").Event(),
+    }
+    view = main._public_batch_view(job)
+    # Mutating the source after the view is taken must NOT affect the view.
+    job["results"]["b"] = {"ok": True}
+    job["errors"]["c"] = "boom"
+    assert view["results"] == {"a": {"ok": True}}
+    assert view["errors"] == {}
+
+
 def test_extra_keys_in_batch_body_rejected(client):
     _make_definition(client)
     resp = client.post(

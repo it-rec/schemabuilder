@@ -47,7 +47,7 @@ def test_is_available_true_with_key_and_sdk(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     # Pretend the SDK is importable. _detect_sdk caches the result, so
     # we just monkeypatch the cache.
-    monkeypatch.setattr(llm_fallback, "_sdk_state", True)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", True)
     assert llm_fallback.is_available() is True
 
 
@@ -55,7 +55,7 @@ def test_is_available_false_when_sdk_missing(monkeypatch):
     """If `anthropic` can't be imported, fallback stays disabled even with
     a key set — no AttributeError downstream."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    monkeypatch.setattr(llm_fallback, "_sdk_state", False)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", False)
     assert llm_fallback.is_available() is False
 
 
@@ -65,7 +65,7 @@ def test_is_available_false_when_sdk_missing(monkeypatch):
 def _stub_client(monkeypatch, parsed_value, confidence=0.9):
     """Install a stub Anthropic client that returns the given parsed
     FieldExtraction without actually touching the SDK."""
-    monkeypatch.setattr(llm_fallback, "_sdk_state", True)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", True)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     stub = MagicMock()
     stub.messages.parse.return_value = MagicMock(
@@ -74,6 +74,7 @@ def _stub_client(monkeypatch, parsed_value, confidence=0.9):
         )
     )
     monkeypatch.setattr(llm_fallback, "_client", stub)
+    monkeypatch.setattr(llm_fallback, "_client_key", "sk-test")
     return stub
 
 
@@ -121,11 +122,12 @@ def test_extract_field_returns_none_when_value_is_null(monkeypatch):
 def test_extract_field_swallows_sdk_exception(monkeypatch):
     """A network error or 500 from the API must NOT propagate — the
     rule-based extraction already produced the canonical result."""
-    monkeypatch.setattr(llm_fallback, "_sdk_state", True)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", True)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     stub = MagicMock()
     stub.messages.parse.side_effect = RuntimeError("API down")
     monkeypatch.setattr(llm_fallback, "_client", stub)
+    monkeypatch.setattr(llm_fallback, "_client_key", "sk-test")
 
     result = llm_fallback.extract_field(
         field_name="x", field_description="", examples=None, document_text="..."
@@ -143,13 +145,41 @@ def test_extract_field_short_circuits_when_unavailable():
     assert result is None
 
 
+def test_extract_field_truncates_oversized_document(monkeypatch):
+    """Regression: a multi-megabyte document body must NOT be forwarded
+    verbatim — the wrapper truncates to _MAX_DOCUMENT_CHARS so a 500-page
+    PDF can't blow Claude's context window in one bad call."""
+    stub = _stub_client(monkeypatch, "x", confidence=0.9)
+    monkeypatch.setattr(llm_fallback, "_MAX_DOCUMENT_CHARS", 1000)
+    huge = "abcdefghij" * 5000  # 50 000 chars
+    llm_fallback.extract_field(
+        field_name="x", field_description="", examples=None, document_text=huge
+    )
+    user_msg = stub.messages.parse.call_args.kwargs["messages"][0]["content"]
+    assert len(user_msg) < 1500  # wrapper + 1000-char body + marker
+    assert "[truncated to 1000 chars]" in user_msg
+
+
+def test_is_available_rechecks_api_key_each_call(monkeypatch):
+    """Regression: previously the env-key check was memoized; rotating
+    or unsetting ANTHROPIC_API_KEY required a process restart. The fix
+    re-checks the env on every call (only the SDK-import probe is memoized,
+    and that result can't actually change at runtime)."""
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", True)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-on")
+    assert llm_fallback.is_available() is True
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    assert llm_fallback.is_available() is False  # was stuck-on before the fix
+
+
 # ── integration: _extract_fields invokes the fallback ────────────────────
 
 
 def test_extract_fields_calls_fallback_for_unmatched_opted_in_field(monkeypatch):
     """Field has use_llm_fallback=True and the matcher couldn't find it
     → the fallback fills extracted_value with match_reason=llm_fallback."""
-    monkeypatch.setattr(llm_fallback, "_sdk_state", True)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", True)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     stub = MagicMock()
     stub.messages.parse.return_value = MagicMock(
@@ -158,6 +188,7 @@ def test_extract_fields_calls_fallback_for_unmatched_opted_in_field(monkeypatch)
         )
     )
     monkeypatch.setattr(llm_fallback, "_client", stub)
+    monkeypatch.setattr(llm_fallback, "_client_key", "sk-test")
 
     definition = {
         "document": {
@@ -184,13 +215,14 @@ def test_extract_fields_calls_fallback_for_unmatched_opted_in_field(monkeypatch)
 
 def test_extract_fields_does_not_call_fallback_when_matcher_found_value(monkeypatch):
     """The matcher already nailed it — we MUST NOT pay for an LLM call."""
-    monkeypatch.setattr(llm_fallback, "_sdk_state", True)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", True)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     stub = MagicMock()
     stub.messages.parse.return_value = MagicMock(
         parsed_output=llm_fallback.FieldExtraction(value="OTHER", confidence=1.0)
     )
     monkeypatch.setattr(llm_fallback, "_client", stub)
+    monkeypatch.setattr(llm_fallback, "_client_key", "sk-test")
 
     definition = {
         "document": {
@@ -214,10 +246,11 @@ def test_extract_fields_does_not_call_fallback_when_matcher_found_value(monkeypa
 
 
 def test_extract_fields_skips_fallback_when_field_not_opted_in(monkeypatch):
-    monkeypatch.setattr(llm_fallback, "_sdk_state", True)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", True)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     stub = MagicMock()
     monkeypatch.setattr(llm_fallback, "_client", stub)
+    monkeypatch.setattr(llm_fallback, "_client_key", "sk-test")
 
     definition = {
         "document": {
@@ -239,7 +272,7 @@ def test_extract_fields_skips_fallback_when_field_not_opted_in(monkeypatch):
 def test_extract_fields_skips_fallback_when_sdk_unavailable(monkeypatch):
     """SDK not detected → opted-in field still gets the None result, not
     a crash."""
-    monkeypatch.setattr(llm_fallback, "_sdk_state", False)
+    monkeypatch.setattr(llm_fallback, "_sdk_import_ok", False)
     definition = {
         "document": {
             "document_type": "Invoice",

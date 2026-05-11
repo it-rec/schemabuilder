@@ -33,6 +33,13 @@ _LLM_MODEL = os.getenv("SCHEMABUILDER_LLM_MODEL") or "claude-opus-4-7"
 # Soft on/off switch. "auto" (default) consults the SDK + env to decide;
 # "0" force-disables; "1" forces enabled (still requires the SDK + key).
 _LLM_ENABLED = (os.getenv("SCHEMABUILDER_LLM_ENABLED") or "auto").lower()
+# Hard cap on the document text we send. Chosen well below Claude's
+# context window to leave room for the system prompt + tool schema +
+# generation budget. Trims from the end (early-document text is usually
+# where headers / IDs / structured fields live).
+_MAX_DOCUMENT_CHARS = max(
+    1000, int(os.getenv("SCHEMABUILDER_LLM_MAX_CHARS") or 150_000)
+)
 
 _SYSTEM_PROMPT = """You are a precision extraction assistant.
 
@@ -67,26 +74,24 @@ class FieldExtraction(BaseModel):
 
 
 # Lazy-initialized SDK + client. Tests can monkeypatch _client directly to
-# avoid touching the SDK at all.
+# avoid touching the SDK at all. `_sdk_import_ok` memoizes only the import
+# probe (immutable across a process); the API-key check is re-run on every
+# is_available() call so a rotated / unset key takes effect immediately.
 _client: Any = None
-_sdk_state: Optional[bool] = None  # None=untested, True=usable, False=unusable
+_client_key: Optional[str] = None  # the key _client was created with
+_sdk_import_ok: Optional[bool] = None
 
 
-def _detect_sdk() -> bool:
-    """Probe whether the SDK is importable AND the API key is set.
-    Memoized so subsequent calls are cheap."""
-    global _sdk_state
-    if _sdk_state is not None:
-        return _sdk_state
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        _sdk_state = False
-        return False
+def _import_ok() -> bool:
+    global _sdk_import_ok
+    if _sdk_import_ok is not None:
+        return _sdk_import_ok
     try:
         import anthropic  # noqa: F401
     except ImportError:
-        _sdk_state = False
+        _sdk_import_ok = False
         return False
-    _sdk_state = True
+    _sdk_import_ok = True
     return True
 
 
@@ -94,26 +99,35 @@ def is_available() -> bool:
     """True iff the fallback can actually run.
 
     `SCHEMABUILDER_LLM_ENABLED=0` short-circuits to False so deploys can
-    hard-disable the fallback without rebuilding."""
+    hard-disable the fallback without rebuilding. The API-key check is
+    NOT memoized — rotating or unsetting `ANTHROPIC_API_KEY` at runtime
+    flips this on the next call rather than at process restart."""
     if _LLM_ENABLED == "0":
         return False
-    return _detect_sdk()
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        return False
+    return _import_ok()
 
 
 def _get_client():
-    global _client
-    if _client is None:
+    """Return a cached Anthropic client; rebuild when the API key changes
+    so a rotated key doesn't keep authenticating with the old credentials."""
+    global _client, _client_key
+    current_key = os.getenv("ANTHROPIC_API_KEY")
+    if _client is None or _client_key != current_key:
         import anthropic
         _client = anthropic.Anthropic()
+        _client_key = current_key
     return _client
 
 
 def reset_for_tests() -> None:
-    """Drop the SDK-probe + client cache. Tests use this between cases that
-    install / remove env vars."""
-    global _client, _sdk_state
+    """Drop every memoized SDK-related piece. Tests use this between
+    cases that install / remove env vars."""
+    global _client, _client_key, _sdk_import_ok
     _client = None
-    _sdk_state = None
+    _client_key = None
+    _sdk_import_ok = None
 
 
 def extract_field(
@@ -148,7 +162,14 @@ def extract_field(
                 user_lines.append(f"Examples of this field's values: {joined}")
         user_lines.append("")
         user_lines.append("Document text:")
-        user_lines.append(document_text)
+        # Clamp the body so a 500-page PDF can't blow Claude's context
+        # window. Tail-truncate because heading / IDs / structured fields
+        # usually live near the top of business documents.
+        if len(document_text) > _MAX_DOCUMENT_CHARS:
+            user_lines.append(document_text[:_MAX_DOCUMENT_CHARS])
+            user_lines.append(f"[truncated to {_MAX_DOCUMENT_CHARS} chars]")
+        else:
+            user_lines.append(document_text)
         user_msg = "\n".join(user_lines)
 
         # messages.parse() validates the response against FieldExtraction

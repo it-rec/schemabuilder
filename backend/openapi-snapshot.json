@@ -590,7 +590,7 @@
     },
     "/api/definitions/{def_id}/versions": {
       "get": {
-        "description": "List the revision archive for a definition (newest first).\nReturns metadata only; the content is fetched per-version.",
+        "description": "List the revision archive for a definition (newest first).\nReturns metadata only; the content is fetched per-version.\n\n404 if neither the live definition nor any archived version exists\nfor this id \u2014 that combination only happens for a typo / never-used\nid, and the inconsistent 200 with empty items obscured the bug.\nA definition that has been deleted but had history still returns\n200 with the archived items so users can browse / resurrect it.",
         "operationId": "list_definition_versions_api_definitions__def_id__versions_get",
         "parameters": [
           {
@@ -1097,7 +1097,7 @@
         "summary": "Cancel Batch"
       },
       "get": {
-        "description": "Current state of a batch job. Returns 404 once the TTL has elapsed.",
+        "description": "Current state of a batch job. Returns 404 once the TTL has elapsed.\n\nSweeps stale jobs on the read path too \u2014 without this, a deployment\nthat ran a batch then sat idle (no further `start_batch_extract`\ncalls) would hold every completed job's result dicts in memory\nindefinitely. With sweep here, polling clients naturally trim the\ntable as old jobs age out.",
         "operationId": "get_batch_status_api_extract_batch__job_id__get",
         "parameters": [
           {

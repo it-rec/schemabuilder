@@ -90,6 +90,16 @@ export default function BatchExtractModal({
 
   const handleCancel = useCallback(async () => {
     if (!jobId) return;
+    // Stop polling immediately so the UI doesn't keep firing /status
+    // requests against a worker that is winding down. The server-side
+    // cancel is async (the worker checks the flag between docs), so
+    // the user might wait minutes for the actual `cancelled` status
+    // otherwise; flipping local state right away avoids that confusion.
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    setStatus("cancelled");
     try {
       await cancelBatch(jobId);
     } catch (err) {

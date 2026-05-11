@@ -401,7 +401,10 @@ _doc_listing_lock = threading.Lock()
 
 # Cached signatures per-definition (id, mtime) → list of (kind, pattern). Built
 # lazily and reused across extract calls for the same definition snapshot.
-_signature_cache: dict = {}
+# LRU-bounded so a deployment churning through many distinct definition
+# mtimes can't accumulate unbounded compiled-signature lists.
+_SIGNATURE_CACHE_MAX = int(os.getenv("SCHEMABUILDER_SIGNATURE_CACHE_MAX") or 256)
+_signature_cache: "OrderedDict" = OrderedDict()
 
 # Module-level Docling converters keyed by do_ocr. Construction loads
 # layout/OCR models which is slow; reuse instances across documents. The
@@ -413,8 +416,11 @@ _text_converters: dict = {}
 _text_converters_lock = threading.Lock()
 
 # Per-document OCR decision cache. Keyed by (filename, file signature) so a
-# file replaced in place is re-evaluated. Entries are bool.
-_ocr_decision_cache: dict = {}
+# file replaced in place is re-evaluated. Entries are bool. LRU-bounded so
+# a long-running process with many distinct documents can't grow it
+# without limit.
+_OCR_DECISION_CACHE_MAX = int(os.getenv("SCHEMABUILDER_OCR_CACHE_MAX") or 512)
+_ocr_decision_cache: "OrderedDict" = OrderedDict()
 _ocr_decision_lock = threading.Lock()
 
 # Doc IDs with a prefetch job already submitted/running. Prevents flooding the
@@ -783,7 +789,7 @@ def _resolve_ocr_decision(filepath: Path) -> bool:
                 "OCR detection failed for %s; defaulting to no OCR", filepath.name
             )
             decision = False
-        _ocr_decision_cache[key] = decision
+        _lru_set(_ocr_decision_cache, key, decision, _OCR_DECISION_CACHE_MAX)
         _metrics_inc("ocr_decisions_on" if decision else "ocr_decisions_off")
         logger.info(
             "OCR decision for %s: %s", filepath.name, "on" if decision else "off"
@@ -1199,12 +1205,18 @@ def _load_definitions() -> dict:
         return defs
 
 
-def _invalidate_definitions_cache() -> None:
+def _invalidate_definitions_cache_locked() -> None:
+    """Caller must already hold `_definitions_lock`. Used inside mutation
+    routes that take the lock for the whole write."""
     global _definitions_cache, _definitions_signature
+    _definitions_cache = None
+    _definitions_signature = None
+    _signature_cache.clear()
+
+
+def _invalidate_definitions_cache() -> None:
     with _definitions_lock:
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
 
 
 # Static, module-level patterns: cheaper than recompiling on every entry.
@@ -1284,7 +1296,7 @@ def _get_signatures_for(def_id: str, definition: dict) -> list:
     if cached is not None:
         return cached
     built = _build_field_signatures(definition)
-    _signature_cache[key] = built
+    _lru_set(_signature_cache, key, built, _SIGNATURE_CACHE_MAX)
     return built
 
 
@@ -2147,11 +2159,7 @@ def delete_definition(def_id: str):
             raise HTTPException(status_code=404, detail="Definition not found")
         # Archive before unlinking so the user can resurrect the
         # definition by POSTing the archived content.
-        try:
-            with open(filepath) as f:
-                _archive_version(def_id, "delete", json.load(f))
-        except (OSError, ValueError):
-            logger.exception("Could not archive %s before delete", def_id)
+        _archive_existing(def_id, "delete", filepath)
         try:
             filepath.unlink()
         except OSError as e:
@@ -2159,10 +2167,7 @@ def delete_definition(def_id: str):
             raise HTTPException(status_code=500, detail=f"Failed to delete: {e}") from e
         # Reset cache state under the same lock so a concurrent /api/definitions
         # GET can't observe stale post-delete state.
-        global _definitions_cache, _definitions_signature
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
     return {"id": def_id, "deleted": True}
 
 
@@ -2272,17 +2277,15 @@ def _versions_dir_for(def_id: str) -> Path:
     return DEFINITIONS_DIR / _VERSIONS_SUBDIR / def_id
 
 
-def _archive_version(def_id: str, action: str, payload: dict) -> Optional[Path]:
-    """Snapshot a definition's pre-mutation contents to the version dir.
+def _archive_existing(def_id: str, action: str, src_path: Path) -> Optional[Path]:
+    """Snapshot the existing definition file at `src_path` into the
+    version dir for `def_id`. Byte-copy — no parse, no re-serialize, so
+    the archived bytes are exactly what was on disk and the archive can
+    never drift from the source via a Pydantic round-trip.
 
     Filename is `{timestamp_ms}-{action}.json`; timestamp doubles as the
-    revision id surfaced via the API. We deliberately archive the OLD
-    contents (the about-to-be-replaced state) so the most recent version
-    file is what the active definition was right before this mutation —
-    if the user wants to roll back, they restore the most recent version.
-
-    Returns the written path (or None on filesystem failure — archiving
-    must never block a mutation).
+    revision id surfaced via the API. Archiving must never block the
+    mutation it precedes, so every failure is logged and swallowed.
     """
     try:
         vdir = _versions_dir_for(def_id)
@@ -2293,8 +2296,12 @@ def _archive_version(def_id: str, action: str, payload: dict) -> Optional[Path]:
         for attempt in range(5):
             candidate = vdir / f"{ts_ms + attempt}-{action}.json"
             if not candidate.exists():
-                _atomic_write_json(candidate, payload)
+                shutil.copyfile(src_path, candidate)
                 return candidate
+        logger.warning(
+            "Archive collision-loop exhausted for %s at ts=%s; version dropped",
+            def_id, ts_ms,
+        )
     except Exception:
         logger.exception("Failed to archive version for %s", def_id)
     return None
@@ -2349,9 +2356,19 @@ def _read_version(def_id: str, version_id: str) -> Optional[dict]:
 @app.get("/api/definitions/{def_id}/versions")
 def list_definition_versions(def_id: str):
     """List the revision archive for a definition (newest first).
-    Returns metadata only; the content is fetched per-version."""
+    Returns metadata only; the content is fetched per-version.
+
+    404 if neither the live definition nor any archived version exists
+    for this id — that combination only happens for a typo / never-used
+    id, and the inconsistent 200 with empty items obscured the bug.
+    A definition that has been deleted but had history still returns
+    200 with the archived items so users can browse / resurrect it."""
     _validate_def_id_shape(def_id)
-    return {"items": _list_versions(def_id), "id": def_id}
+    live_exists = (DEFINITIONS_DIR / f"{def_id}.json").exists()
+    items = _list_versions(def_id)
+    if not live_exists and not items:
+        raise HTTPException(status_code=404, detail="Definition not found")
+    return {"items": items, "id": def_id}
 
 
 @app.get("/api/definitions/{def_id}/versions/{version_id}")
@@ -2404,19 +2421,12 @@ def create_definition(
                     f"Use PATCH /api/definitions/{def_id} or POST with ?overwrite=true."
                 ),
             )
-        # If this is a forced overwrite, archive the about-to-be-replaced
-        # content first so users can roll back.
+        # Forced overwrite: archive the about-to-be-replaced content
+        # first so users can roll back.
         if filepath.exists():
-            try:
-                with open(filepath) as f:
-                    _archive_version(def_id, "overwrite", json.load(f))
-            except (OSError, ValueError):
-                logger.exception("Could not archive %s before overwrite", def_id)
+            _archive_existing(def_id, "overwrite", filepath)
         _atomic_write_json(filepath, payload)
-        global _definitions_cache, _definitions_signature
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
 
     return {
         "id": def_id,
@@ -2441,16 +2451,9 @@ def patch_definition(def_id: str, body: DefinitionBody):
         if not filepath.exists():
             raise HTTPException(status_code=404, detail="Definition not found")
         # Archive the current version so the user can roll back.
-        try:
-            with open(filepath) as f:
-                _archive_version(def_id, "patch", json.load(f))
-        except (OSError, ValueError):
-            logger.exception("Could not archive %s before patch", def_id)
+        _archive_existing(def_id, "patch", filepath)
         _atomic_write_json(filepath, payload)
-        global _definitions_cache, _definitions_signature
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
     return {
         "id": def_id,
         "document_type": body.document.document_type,
@@ -2538,10 +2541,7 @@ def add_field_example(def_id: str, field_name: str, body: FieldExampleBody):
             )
         examples.append(body.value)
         _atomic_write_json(filepath, definition)
-        global _definitions_cache, _definitions_signature
-        _definitions_cache = None
-        _definitions_signature = None
-        _signature_cache.clear()
+        _invalidate_definitions_cache_locked()
 
     return {
         "id": def_id,
@@ -2677,8 +2677,8 @@ def _csv_response(table_name: str, rows: list[dict], filename_stem: str) -> Resp
     for row in rows:
         writer.writerow({k: ("" if v is None else v) for k, v in row.items()})
     body = buf.getvalue().encode("utf-8")
-    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", filename_stem).strip("_") or "export"
-    safe_table = re.sub(r"[^A-Za-z0-9._-]+", "_", table_name).strip("_") or "table"
+    safe_stem = _FILENAME_SAFE_RE.sub("_", filename_stem).strip("_") or "export"
+    safe_table = _FILENAME_SAFE_RE.sub("_", table_name).strip("_") or "table"
     return Response(
         content=body,
         media_type="text/csv; charset=utf-8",
@@ -2802,15 +2802,22 @@ def _sweep_old_batch_jobs() -> None:
 
 
 def _public_batch_view(job: dict) -> dict:
-    """Job state minus internals (cancel event, raw definition) for the API."""
+    """Job state minus internals (cancel event, raw definition) for the API.
+
+    SHALLOW-COPIES the per-doc dicts. The worker mutates `results`/`errors`
+    in place; if we returned the live references, FastAPI's JSON encoder
+    would iterate them after this function releases the jobs lock and
+    could race the worker mid-iteration ("dictionary changed size during
+    iteration"). The copies are immediate so the encoder sees a stable
+    snapshot."""
     return {
         "job_id": job["id"],
         "definition_id": job["definition_id"],
         "status": job["status"],
         "total": job["total"],
         "completed": job["completed"],
-        "results": job["results"],
-        "errors": job["errors"],
+        "results": dict(job["results"]),
+        "errors": dict(job["errors"]),
         "started_at": job["started_at"],
         "completed_at": job["completed_at"],
     }
@@ -2855,13 +2862,15 @@ def _run_batch_job(job: dict) -> None:
             finally:
                 _extract_semaphore.release()
 
-            job["results"][doc_id] = {
-                "document_id": doc_id,
-                "fields": fields,
-            }
+            with _batch_jobs_lock:
+                job["results"][doc_id] = {
+                    "document_id": doc_id,
+                    "fields": fields,
+                }
         except Exception as e:  # noqa: BLE001 — surface every per-doc failure
             logger.exception("Batch %s: %s failed", job_id, doc_id)
-            job["errors"][doc_id] = str(e)
+            with _batch_jobs_lock:
+                job["errors"][doc_id] = str(e)
         finally:
             with _batch_jobs_lock:
                 job["completed"] += 1
@@ -2917,8 +2926,15 @@ def start_batch_extract(body: BatchExtractBody):
 
 @app.get("/api/extract/batch/{job_id}")
 def get_batch_status(job_id: str):
-    """Current state of a batch job. Returns 404 once the TTL has elapsed."""
+    """Current state of a batch job. Returns 404 once the TTL has elapsed.
+
+    Sweeps stale jobs on the read path too — without this, a deployment
+    that ran a batch then sat idle (no further `start_batch_extract`
+    calls) would hold every completed job's result dicts in memory
+    indefinitely. With sweep here, polling clients naturally trim the
+    table as old jobs age out."""
     with _batch_jobs_lock:
+        _sweep_old_batch_jobs()
         job = _batch_jobs.get(job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Batch job not found")
