@@ -763,6 +763,90 @@ def test_build_text_converter_falls_back_to_pipeline_options_module(monkeypatch)
     main._build_text_converter(do_ocr=False)
 
 
+def test_build_text_converter_falls_back_when_pipeline_options_module_missing(
+    monkeypatch,
+):
+    """Reproduces the user-reported failure mode: the entire
+    `docling.datamodel.pipeline_options` submodule is not importable in the
+    installed docling distribution. The builder must locate `PdfPipelineOptions`
+    via a fallback module path instead of crashing the warm-up thread.
+    """
+
+    class _FakeAcceleratorDevice:
+        AUTO = "AUTO"
+        CPU = "CPU"
+
+    class _FakeAcceleratorOptions:
+        def __init__(self, num_threads, device): pass
+
+    class _FakePipelineOptions:
+        def __init__(self):
+            self.generate_page_images = False
+            self.images_scale = 2.0
+            self.accelerator_options = None
+            self.do_ocr = False
+
+    class _FakePdfFormatOption:
+        def __init__(self, pipeline_options): self.pipeline_options = pipeline_options
+
+    class _FakeDocConverter:
+        def __init__(self, format_options): pass
+
+    # `docling.datamodel.pipeline_options` is deliberately absent. Expose
+    # PdfPipelineOptions on a sibling submodule (a layout newer docling
+    # distributions have shipped) and accelerator options on their dedicated
+    # module so each symbol group resolves through a different fallback rung.
+    fake_pdf_pipe_mod = types.SimpleNamespace(
+        PdfPipelineOptions=_FakePipelineOptions,
+    )
+    fake_accel_mod = types.SimpleNamespace(
+        AcceleratorDevice=_FakeAcceleratorDevice,
+        AcceleratorOptions=_FakeAcceleratorOptions,
+    )
+    fake_doc_conv = types.SimpleNamespace(
+        DocumentConverter=_FakeDocConverter,
+        PdfFormatOption=_FakePdfFormatOption,
+    )
+
+    monkeypatch.setitem(sys.modules, "docling", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "docling.datamodel", types.SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules, "docling.datamodel.pdf_pipeline_options", fake_pdf_pipe_mod
+    )
+    monkeypatch.setitem(
+        sys.modules, "docling.datamodel.accelerator_options", fake_accel_mod
+    )
+    monkeypatch.setitem(sys.modules, "docling.document_converter", fake_doc_conv)
+    # Critical: ensure the original location truly fails to import so the
+    # fallback path is the only one that can satisfy PdfPipelineOptions.
+    sys.modules.pop("docling.datamodel.pipeline_options", None)
+    monkeypatch.delenv("DOCLING_DEVICE", raising=False)
+
+    # Should not raise — exactly the regression we are guarding against.
+    main._build_text_converter(do_ocr=False)
+
+
+def test_import_docling_symbols_raises_actionable_error_when_all_paths_fail(
+    monkeypatch,
+):
+    """If every candidate path either fails to import or lacks the requested
+    symbols, surface a single clear error naming what was tried — so the
+    next layout drift is easy to diagnose from the warm-up log line.
+    """
+    # Empty fake modules: importable, but missing the symbol.
+    monkeypatch.setitem(sys.modules, "docling", types.SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "docling.datamodel", types.SimpleNamespace())
+
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        main._import_docling_symbols(
+            ("docling.datamodel", "docling"), ("DefinitelyNotAThing",)
+        )
+    msg = str(excinfo.value)
+    assert "DefinitelyNotAThing" in msg
+    assert "docling.datamodel" in msg
+    assert "docling" in msg
+
+
 # ── _convert_to_pdf (pywin32 / Office COM fake) ─────────────────────────
 
 
