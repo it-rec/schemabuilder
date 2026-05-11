@@ -47,7 +47,7 @@ test("displays page image and pagination", () => {
     />
   );
   expect(screen.getByText("Page 1 of 3")).toBeInTheDocument();
-  const img = screen.getByAltText("Page 1");
+  const img = screen.getByAltText(/page 1 of 3/i);
   expect(img).toHaveAttribute(
     "src",
     "http://localhost:8000/api/documents/abc/pages/1"

@@ -35,7 +35,13 @@ export default function DocumentList({ documents, selectedId, onSelect }) {
   const handleQueryChange = useCallback((e) => setQuery(e.target.value), []);
 
   return (
-    <div className="document-list">
+    <section className="document-list" aria-labelledby="document-list-heading">
+      <h2
+        id="document-list-heading"
+        className="document-list__heading"
+      >
+        Documents
+      </h2>
       <Search
         size="md"
         placeholder="Search documents..."
@@ -43,7 +49,10 @@ export default function DocumentList({ documents, selectedId, onSelect }) {
         value={query}
         onChange={handleQueryChange}
       />
-      <StructuredListWrapper selection className="document-list__items">
+      <StructuredListWrapper
+        className="document-list__items"
+        aria-label="Document selection"
+      >
         <StructuredListHead>
           <StructuredListRow head>
             <StructuredListCell head>Document</StructuredListCell>
@@ -54,20 +63,27 @@ export default function DocumentList({ documents, selectedId, onSelect }) {
           {filtered.map((doc) => {
             const Icon = ICON_MAP[doc.extension] || DocumentPdf;
             const isSelected = doc.id === selectedId;
+            const selectedClass = isSelected ? " document-list__row--selected" : "";
             return (
               <StructuredListRow
                 key={doc.id}
                 onClick={() => onSelect(doc.id)}
-                className={isSelected ? "document-list__row--selected" : ""}
+                className={`document-list__row${selectedClass}`}
+                role="button"
                 tabIndex={0}
+                aria-pressed={isSelected}
+                aria-label={`Select ${doc.filename}, ${formatSize(doc.size)}`}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") onSelect(doc.id);
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelect(doc.id);
+                  }
                 }}
                 data-testid={`doc-row-${doc.id}`}
               >
                 <StructuredListCell>
                   <span className="document-list__name">
-                    <Icon size={20} />
+                    <Icon size={20} aria-hidden="true" />
                     <span>{doc.filename}</span>
                   </span>
                 </StructuredListCell>
@@ -84,6 +100,6 @@ export default function DocumentList({ documents, selectedId, onSelect }) {
           )}
         </StructuredListBody>
       </StructuredListWrapper>
-    </div>
+    </section>
   );
 }

@@ -162,12 +162,19 @@ export default function App() {
 
   return (
     <Theme theme="g10">
-      <Header aria-label="Document Viewer">
-        <HeaderName prefix="IBM">Schema Builder</HeaderName>
+      <Header aria-label="IBM Schema Builder">
+        <HeaderName prefix="IBM" href="#" onClick={(e) => e.preventDefault()}>
+          Schema Builder
+        </HeaderName>
       </Header>
       <Content className="app-content">
+        <h1 className="cds--visually-hidden">IBM Schema Builder</h1>
         <div className="app-layout">
-          <aside className="app-layout__sidebar" data-testid="document-list-panel">
+          <aside
+            className="app-layout__sidebar"
+            aria-label="Documents and document class"
+            data-testid="document-list-panel"
+          >
             <div className="definition-selector">
               <Dropdown
                 id="definition-selector"
@@ -186,7 +193,11 @@ export default function App() {
               onSelect={handleSelect}
             />
           </aside>
-          <main className="app-layout__main" data-testid="document-viewer-panel">
+          <main
+            className="app-layout__main"
+            aria-label="Document viewer"
+            data-testid="document-viewer-panel"
+          >
             <DocumentViewer
               docId={selectedDocId}
               documentData={viewerData}
@@ -194,7 +205,11 @@ export default function App() {
               loading={loading}
             />
           </main>
-          <aside className="app-layout__panel" data-testid="fields-panel">
+          <aside
+            className="app-layout__panel"
+            aria-label="Extracted fields"
+            data-testid="fields-panel"
+          >
             <FieldsPanel
               extraction={extraction}
               onHoverField={handleHoverField}

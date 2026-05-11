@@ -6,6 +6,14 @@
 @use "@carbon/styles/scss/breakpoint";
 @use "@carbon/styles/scss/theme";
 @use "@carbon/styles/scss/type";
+@use "@carbon/styles/scss/motion" as motion;
+
+// Carbon focus ring used across custom interactive elements so that keyboard
+// navigation has the same affordance Carbon's own components offer.
+@mixin focus-ring {
+  outline: 2px solid var(--cds-focus, #0f62fe);
+  outline-offset: -2px;
+}
 
 .app-content {
   padding-top: 3rem; // Account for Carbon header
@@ -88,29 +96,41 @@
   }
 }
 
+.document-list__heading {
+  @include type.type-style("heading-compact-02");
+  color: var(--cds-text-primary, #161616);
+  margin: 0 0 spacing.$spacing-04 0;
+}
+
 .document-list__items {
   .cds--structured-list-row {
     cursor: pointer;
-    transition: background-color 0.15s;
+    transition: background-color motion.$duration-fast-02 motion.motion(standard, productive);
 
     &:hover {
       background: var(--cds-layer-hover-01, #e8e8e8);
+    }
+
+    &:focus-visible {
+      @include focus-ring;
     }
   }
 }
 
 .document-list__row--selected {
   background: var(--cds-layer-selected-01, #e0e0e0) !important;
-  border-left: 3px solid var(--cds-link-primary, #0f62fe);
+  box-shadow: inset 3px 0 0 0 var(--cds-border-interactive, #0f62fe);
 }
 
 .document-list__name {
   display: flex;
   align-items: center;
   gap: spacing.$spacing-03;
+  color: var(--cds-text-primary, #161616);
 
   svg {
     flex-shrink: 0;
+    color: var(--cds-icon-secondary, #525252);
   }
 }
 
@@ -128,6 +148,12 @@
   justify-content: center;
   height: 100%;
   color: var(--cds-text-secondary, #525252);
+}
+
+.document-viewer__empty-text {
+  @include type.type-style("body-01");
+  color: var(--cds-text-secondary, #525252);
+  margin: 0;
 }
 
 .document-viewer__toolbar {
@@ -210,20 +236,29 @@
 
 .fields-panel__field-header {
   padding: spacing.$spacing-03 spacing.$spacing-04;
-  border-radius: 4px;
   border: 1px solid var(--cds-border-subtle, #e0e0e0);
   background: var(--cds-layer-02, #ffffff);
   cursor: default;
-  transition: background-color 0.15s, border-color 0.15s;
+  transition:
+    background-color motion.$duration-fast-02 motion.motion(standard, productive),
+    border-color motion.$duration-fast-02 motion.motion(standard, productive);
 
   &:hover {
-    border-color: var(--cds-link-primary, #0f62fe);
+    border-color: var(--cds-border-interactive, #0f62fe);
     background: var(--cds-layer-hover-01, #e8e8e8);
+  }
+
+  &:focus-visible {
+    @include focus-ring;
+  }
+
+  &[role="button"] {
+    cursor: pointer;
   }
 }
 
 .fields-panel__field-header--matched {
-  border-left: 3px solid var(--cds-support-success, #24a148);
+  box-shadow: inset 3px 0 0 0 var(--cds-support-success, #24a148);
 }
 
 .fields-panel__field-label-row {
@@ -236,8 +271,26 @@
 .fields-panel__expand-icon {
   display: flex;
   align-items: center;
-  color: var(--cds-text-secondary, #525252);
-  cursor: pointer;
+  color: var(--cds-icon-secondary, #525252);
+}
+
+// Carbon recommends visually-hiding ghost button chrome around icons that act
+// as tooltip triggers (e.g. confidence indicators). The button gives us focus
+// + aria-label, but should not draw a frame around the icon.
+.fields-panel__confidence-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  cursor: help;
+  color: inherit;
+
+  &:focus-visible {
+    @include focus-ring;
+  }
 }
 
 .fields-panel__field-name {
@@ -259,8 +312,26 @@
   gap: spacing.$spacing-03;
   margin-top: spacing.$spacing-02;
   padding: spacing.$spacing-02 spacing.$spacing-03;
-  border-radius: 2px;
   background: var(--cds-layer-01, #f4f4f4);
+}
+
+.fields-panel__error {
+  display: flex;
+  align-items: flex-start;
+  gap: spacing.$spacing-03;
+  padding: spacing.$spacing-03 spacing.$spacing-04;
+  margin-bottom: spacing.$spacing-04;
+  background: var(--cds-notification-background-error, #fff1f1);
+  border-left: 3px solid var(--cds-support-error, #da1e28);
+  color: var(--cds-text-primary, #161616);
+
+  @include type.type-style("body-compact-01");
+}
+
+.fields-panel__error-icon {
+  color: var(--cds-support-error, #da1e28);
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 .fields-panel__field-value--empty {
@@ -335,15 +406,17 @@
 
 .fields-panel__sub-field {
   padding: spacing.$spacing-02 spacing.$spacing-03;
-  border-radius: 2px;
   margin-bottom: spacing.$spacing-02;
   border: 1px solid transparent;
-  transition: background-color 0.15s, border-color 0.15s;
+  transition:
+    background-color motion.$duration-fast-02 motion.motion(standard, productive),
+    border-color motion.$duration-fast-02 motion.motion(standard, productive);
   cursor: default;
 
-  &:hover {
+  &:hover,
+  &:focus-within {
     background: var(--cds-layer-hover-01, #e8e8e8);
-    border-color: var(--cds-link-primary, #0f62fe);
+    border-color: var(--cds-border-interactive, #0f62fe);
   }
 }
 
@@ -403,14 +476,15 @@
 .text-entries-panel__item {
   padding: spacing.$spacing-03;
   margin-bottom: spacing.$spacing-03;
-  border-radius: 4px;
   border: 1px solid transparent;
   cursor: default;
-  transition: background-color 0.15s, border-color 0.15s;
+  transition:
+    background-color motion.$duration-fast-02 motion.motion(standard, productive),
+    border-color motion.$duration-fast-02 motion.motion(standard, productive);
 
   &:hover {
     background: var(--cds-layer-hover-01, #e8e8e8);
-    border-color: var(--cds-link-primary, #0f62fe);
+    border-color: var(--cds-border-interactive, #0f62fe);
   }
 }
 
