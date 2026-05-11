@@ -445,12 +445,11 @@
   height: 100%;
 }
 
-.document-viewer--loading,
-.document-viewer--empty {
+.document-viewer__placeholder-body {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 100%;
   color: var(--cds-text-secondary, #525252);
 }
 
@@ -468,6 +467,13 @@
   padding: spacing.$spacing-03;
   border-bottom: 1px solid var(--cds-border-subtle, #e0e0e0);
   background: var(--cds-layer-01, #f4f4f4);
+}
+
+// Empty/loading variant: keep the same height + chrome as the live toolbar so
+// the middle column's top strip aligns with the sidebar/panel headers, but
+// drop the inner controls.
+.document-viewer__toolbar--placeholder {
+  min-height: calc(2rem + #{spacing.$spacing-03} * 2);
 }
 
 .document-viewer__page-info {

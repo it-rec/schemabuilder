@@ -183,22 +183,30 @@ export default function DocumentViewer({
 
   if (loading) {
     return (
-      <div
-        className="document-viewer document-viewer--loading"
-        role="status"
-        aria-live="polite"
-      >
-        <Loading description="Loading document..." withOverlay={false} />
+      <div className="document-viewer" role="status" aria-live="polite">
+        <div
+          className="document-viewer__toolbar document-viewer__toolbar--placeholder"
+          aria-hidden="true"
+        />
+        <div className="document-viewer__placeholder-body">
+          <Loading description="Loading document..." withOverlay={false} />
+        </div>
       </div>
     );
   }
 
   if (!docId || !documentData) {
     return (
-      <div className="document-viewer document-viewer--empty">
-        <p className="document-viewer__empty-text">
-          Select a document to view.
-        </p>
+      <div className="document-viewer">
+        <div
+          className="document-viewer__toolbar document-viewer__toolbar--placeholder"
+          aria-hidden="true"
+        />
+        <div className="document-viewer__placeholder-body">
+          <p className="document-viewer__empty-text">
+            Select a document to view.
+          </p>
+        </div>
       </div>
     );
   }
