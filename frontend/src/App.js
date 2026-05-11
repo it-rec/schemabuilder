@@ -33,89 +33,104 @@ export default function App() {
   // Highlighted field (for document overlay)
   const [highlightedField, setHighlightedField] = useState(null);
 
-  // Load document list and definitions on mount
+  // Load document list and definitions on mount. AbortController cancels
+  // in-flight fetches if the component unmounts (HMR / route change), avoiding
+  // late state writes against an unmounted tree.
   useEffect(() => {
-    fetchDocuments()
+    const ctrl = new AbortController();
+    fetchDocuments({ signal: ctrl.signal })
       .then((docs) => {
         setDocuments(docs);
         if (docs.length > 0) {
           setSelectedDocId(docs[0].id);
         }
       })
-      .catch(console.error);
+      .catch((err) => {
+        if (err?.name !== "AbortError") console.error(err);
+      });
 
-    fetchDefinitions()
+    fetchDefinitions({ signal: ctrl.signal })
       .then((defs) => {
         setDefinitions(defs);
         if (defs.length > 0) {
           setSelectedDefId(defs[0].id);
         }
       })
-      .catch(console.error);
+      .catch((err) => {
+        if (err?.name !== "AbortError") console.error(err);
+      });
+    return () => ctrl.abort();
   }, []);
 
-  // Load document data when selection changes. Use a `cancelled` flag so a
-  // slow response from a previously-selected document can't overwrite state
-  // for the doc the user has since switched to.
+  // Load document data when selection changes. AbortController kills the
+  // in-flight metadata fetch when the user switches docs again before it
+  // resolves — saves backend cycles vs. the prior `cancelled` flag, which
+  // only suppressed the late state write.
   useEffect(() => {
     if (!selectedDocId) return;
-    let cancelled = false;
+    const ctrl = new AbortController();
     setLoading(true);
     setDocumentData(null);
     setExtraction(null);
     setHighlightedField(null);
 
-    // Kick the page-1 image fetch off in parallel with metadata. The metadata
-    // request also triggers backend prefetch (page render + Docling), so by
-    // the time documentData arrives the PNG is usually already in the browser
-    // disk cache and the <img> in DocumentViewer hits it instantly.
+    // Kick page-1 (and a low-priority page-2) image fetches off in parallel
+    // with metadata. The metadata request also triggers backend prefetch
+    // (page render + Docling), so by the time documentData arrives the PNG
+    // is usually already in the browser disk cache and the <img> in
+    // DocumentViewer hits it instantly. Page 2 follows so a click on "next"
+    // is also warm without competing with the visible page's request.
     const warmImg = new Image();
     if ("fetchPriority" in warmImg) warmImg.fetchPriority = "high";
     warmImg.decoding = "async";
     warmImg.src = getPageImageUrl(selectedDocId, 1);
+    const warmImg2 = new Image();
+    if ("fetchPriority" in warmImg2) warmImg2.fetchPriority = "low";
+    warmImg2.decoding = "async";
+    warmImg2.src = getPageImageUrl(selectedDocId, 2);
 
-    fetchDocument(selectedDocId)
+    fetchDocument(selectedDocId, { signal: ctrl.signal })
       .then((data) => {
-        if (!cancelled) setDocumentData(data);
+        if (!ctrl.signal.aborted) setDocumentData(data);
       })
       .catch((err) => {
-        if (!cancelled) console.error(err);
+        if (err?.name !== "AbortError") console.error(err);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!ctrl.signal.aborted) setLoading(false);
       });
     return () => {
-      cancelled = true;
-      // Release the warm-up reference so the browser can free the decoded
-      // bitmap if we abandoned this doc before the image landed.
+      ctrl.abort();
+      // Release the warm-up references so the browser can free the decoded
+      // bitmaps if we abandoned this doc before the images landed.
       warmImg.src = "";
+      warmImg2.src = "";
     };
   }, [selectedDocId]);
 
-  // Extract fields when document + definition are both available. Same
-  // cancellation guard: rapid doc/definition switches can't surface stale
-  // extraction results from a prior pair.
+  // Extract fields when document + definition are both available. Cancels the
+  // in-flight POST when inputs change so a stale extraction can't land in
+  // state and (more importantly) doesn't keep the backend's concurrency slot
+  // occupied longer than necessary.
   useEffect(() => {
     if (!selectedDocId || !selectedDefId || !documentData) return;
-    let cancelled = false;
+    const ctrl = new AbortController();
     setExtracting(true);
     setExtraction(null);
     // Drop any field highlight from the prior definition; its bbox refers to
     // a field object that no longer exists in the new extraction.
     setHighlightedField(null);
-    extractFields(selectedDocId, selectedDefId)
+    extractFields(selectedDocId, selectedDefId, { signal: ctrl.signal })
       .then((data) => {
-        if (!cancelled) setExtraction(data);
+        if (!ctrl.signal.aborted) setExtraction(data);
       })
       .catch((err) => {
-        if (!cancelled) console.error(err);
+        if (err?.name !== "AbortError") console.error(err);
       })
       .finally(() => {
-        if (!cancelled) setExtracting(false);
+        if (!ctrl.signal.aborted) setExtracting(false);
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => ctrl.abort();
   }, [selectedDocId, selectedDefId, documentData]);
 
   const handleSelect = useCallback((id) => {

@@ -374,6 +374,180 @@ def test_extraction_error_surfaces_in_response(client, monkeypatch):
     assert isinstance(body["fields"], list)
 
 
+# ── /ready endpoint ─────────────────────────────────────────────────────
+
+
+def test_ready_returns_503_until_warmup_done(client):
+    main._warmup_done.clear()
+    try:
+        resp = client.get("/ready")
+        assert resp.status_code == 503
+        assert resp.headers.get("Retry-After") == "5"
+        assert resp.json() == {"ready": False}
+    finally:
+        main._warmup_done.set()
+
+
+def test_ready_returns_200_after_warmup(client):
+    main._warmup_done.set()
+    resp = client.get("/ready")
+    assert resp.status_code == 200
+    assert resp.json() == {"ready": True}
+
+
+def test_health_reports_ready_flag(client):
+    main._warmup_done.set()
+    body = client.get("/health").json()
+    assert body["ready"] is True
+    main._warmup_done.clear()
+    try:
+        body = client.get("/health").json()
+        assert body["ready"] is False
+        # Liveness still 200 even when not yet ready.
+        assert body["status"] == "ok"
+    finally:
+        main._warmup_done.set()
+
+
+# ── body-size limit middleware ──────────────────────────────────────────
+
+
+def test_body_size_limit_rejects_oversized(client, monkeypatch):
+    # Lower the cap so we can prove it fires without sending megabytes.
+    monkeypatch.setattr(main, "_MAX_BODY_BYTES", 64)
+    big = {"document": {"document_type": "X" * 200, "fields": []}}
+    resp = client.post("/api/definitions", json=big)
+    assert resp.status_code == 413
+    assert "exceeds" in resp.text.lower()
+
+
+def test_body_size_limit_allows_normal(client, monkeypatch):
+    # Sanity: normal-sized definition still goes through.
+    monkeypatch.setattr(main, "_MAX_BODY_BYTES", 1_000_000)
+    resp = client.post("/api/definitions", json=_valid_definition())
+    assert resp.status_code == 200
+
+
+# ── /extract concurrency limiter ────────────────────────────────────────
+
+
+def test_extract_returns_503_when_semaphore_saturated(client, monkeypatch):
+    # Drain the semaphore so the next acquire fails. We don't actually run
+    # extraction; the limiter rejects before _track_inflight is entered.
+    docs_dir = main.TEST_DOCS_DIR
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    doc_path = docs_dir / "busy.pdf"
+    doc_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    doc_id = main._get_document_id(doc_path.name)
+    main._render_cache[doc_id] = {
+        "filename": doc_path.name,
+        "num_pages": 1,
+        "page_dimensions": {1: {"width": 100, "height": 100}},
+        "pdf_path": str(doc_path),
+        "page_images": {},
+        "_sig": main._file_signature(doc_path),
+    }
+    client.post("/api/definitions", json=_valid_definition())
+
+    held = []
+    for _ in range(main._MAX_CONCURRENT_EXTRACTS):
+        assert main._extract_semaphore.acquire(blocking=False)
+        held.append(True)
+    try:
+        resp = client.post(
+            f"/api/documents/{doc_id}/extract",
+            json={"definition_id": "test_type"},
+        )
+        assert resp.status_code == 503
+        assert resp.headers.get("Retry-After") == "5"
+        # And the rejection counter ticked.
+        body = client.get("/metrics").json()
+        assert body["counters"]["extractions_rejected"] >= 1
+    finally:
+        for _ in held:
+            main._extract_semaphore.release()
+
+
+# ── X-Request-ID sanitization ───────────────────────────────────────────
+
+
+def test_request_id_rejects_unsafe_characters(client):
+    # Header injection / control chars must not be propagated; we generate a
+    # fresh id instead.
+    resp = client.get("/health", headers={"X-Request-ID": "bad id\r\nX-Evil: 1"})
+    rid = resp.headers.get("X-Request-ID")
+    assert rid is not None
+    assert "\r" not in rid and "\n" not in rid and " " not in rid
+    assert rid != "bad id\r\nX-Evil: 1"
+
+
+def test_request_id_rejects_overlong(client):
+    too_long = "a" * 65
+    resp = client.get("/health", headers={"X-Request-ID": too_long})
+    rid = resp.headers.get("X-Request-ID")
+    assert rid != too_long
+    assert len(rid) <= 64
+
+
+# ── document listing caching ────────────────────────────────────────────
+
+
+def test_documents_listing_cached_until_dir_changes(client, tmp_path):
+    docs_dir = main.TEST_DOCS_DIR
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    (docs_dir / "a.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    body1 = client.get("/api/documents").json()
+    assert body1["total"] == 1
+    cached_obj = main._doc_listing_cache
+    # Second call: same signature → same cached object reused.
+    client.get("/api/documents")
+    assert main._doc_listing_cache is cached_obj
+    # New file → cache invalidated, listing rebuilt.
+    (docs_dir / "b.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    body2 = client.get("/api/documents").json()
+    assert body2["total"] == 2
+    assert main._doc_listing_cache is not cached_obj
+
+
+# ── text-entry pre-lowered annotation ───────────────────────────────────
+
+
+def test_text_cache_entries_have_pre_lowered_text(client, monkeypatch):
+    """Cached text entries must be annotated at extraction time so per-/extract
+    matching doesn't have to re-lower every entry on every call."""
+    docs_dir = main.TEST_DOCS_DIR
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    doc_path = docs_dir / "annotated.pdf"
+    doc_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    doc_id = main._get_document_id(doc_path.name)
+    main._render_cache[doc_id] = {
+        "filename": doc_path.name,
+        "num_pages": 1,
+        "page_dimensions": {1: {"width": 100, "height": 100}},
+        "pdf_path": str(doc_path),
+        "page_images": {},
+        "_sig": main._file_signature(doc_path),
+    }
+
+    def fake_extract(_filepath):
+        return [
+            {"id": 0, "text": "INV-001", "type": "TextItem", "page": 1, "bbox": None},
+        ], {1: {"width": 100, "height": 100}}
+
+    monkeypatch.setattr(main, "_extract_text", fake_extract)
+    client.post("/api/definitions", json=_valid_definition())
+    client.post(
+        f"/api/documents/{doc_id}/extract",
+        json={"definition_id": "test_type"},
+    )
+
+    cached = main._text_cache.get(doc_id)
+    assert cached is not None
+    entry = cached["text_entries"][0]
+    assert entry["_text_lower"] == "inv-001"
+    assert entry["_text_stripped_lower"] == "inv-001"
+
+
 def test_extraction_error_is_not_cached(client, monkeypatch):
     """A transient extraction failure must not poison the cache; the next
     call should retry rather than replaying the empty result."""
