@@ -45,6 +45,9 @@ beforeEach(() => {
   api.fetchDefinitions.mockResolvedValue(mockDefinitions);
   api.extractFields.mockResolvedValue(mockExtraction);
   api.getPageImageUrl.mockReturnValue("http://localhost:8000/api/documents/abc123/pages/1");
+  // useConnectionStatus probes /health on mount; default to "backend reachable"
+  // so the offline overlay does not block the rest of the test suite.
+  api.checkHealth.mockResolvedValue({ status: "ok" });
 });
 
 test("renders three panels", async () => {
@@ -122,6 +125,37 @@ test("theme toggle flips data attribute / updates label", async () => {
   expect(toggle).toHaveAttribute("aria-label", expect.stringMatching(/dark mode/i));
   fireEvent.click(toggle);
   expect(toggle).toHaveAttribute("aria-label", expect.stringMatching(/light mode/i));
+});
+
+test("renders the offline overlay when the health probe fails", async () => {
+  api.checkHealth.mockRejectedValue(new Error("Network error"));
+  // beforeEach only resets mock implementations, not call counts — clear so
+  // we can assert that no fetch fires while the overlay is up.
+  api.fetchDocuments.mockClear();
+  api.fetchDefinitions.mockClear();
+  render(<App />);
+  expect(await screen.findByTestId("offline-overlay")).toBeInTheDocument();
+  expect(screen.getByText(/you're offline/i)).toBeInTheDocument();
+  // Data fetches are gated until /health succeeds.
+  expect(api.fetchDocuments).not.toHaveBeenCalled();
+});
+
+test("retry button re-probes and loads data once the backend is back", async () => {
+  // First probe (on mount) fails; subsequent probes (the retry click + the
+  // polling tick afterwards) succeed. The hook re-runs the initial loads on
+  // every offline→online transition, so fetchDocuments should fire.
+  api.checkHealth
+    .mockRejectedValueOnce(new Error("Network error"))
+    .mockResolvedValue({ status: "ok" });
+
+  render(<App />);
+  const retry = await screen.findByTestId("offline-overlay-retry");
+  fireEvent.click(retry);
+
+  await waitFor(() =>
+    expect(screen.queryByTestId("offline-overlay")).not.toBeInTheDocument(),
+  );
+  await waitFor(() => expect(api.fetchDocuments).toHaveBeenCalled());
 });
 
 test("export menu triggers JSON download via api.exportTablesJson", async () => {

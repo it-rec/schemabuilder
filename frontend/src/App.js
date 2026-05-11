@@ -17,6 +17,8 @@ import DefinitionEditor from "./components/DefinitionEditor";
 import DefinitionHistory from "./components/DefinitionHistory";
 import ExampleTeacher from "./components/ExampleTeacher";
 import BatchExtractModal from "./components/BatchExtractModal";
+import OfflineOverlay from "./components/OfflineOverlay";
+import { useConnectionStatus } from "./hooks/useConnectionStatus";
 import {
   fetchDocuments,
   fetchDocument,
@@ -31,6 +33,13 @@ import {
 import "./App.scss";
 
 export default function App() {
+  // Backend reachability. While `online` is anything other than true we
+  // render the OfflineOverlay and mark the rest of the tree `inert` so no
+  // network-bound interaction can happen. `reloadKey` flips on each
+  // null→true / false→true transition so the initial-load effect re-runs
+  // and the panels repopulate with fresh data once the backend is back.
+  const { online, retrying, reloadKey, retry } = useConnectionStatus();
+
   const [documents, setDocuments] = useState([]);
   const [selectedDocId, setSelectedDocId] = useState(null);
   const [documentData, setDocumentData] = useState(null);
@@ -127,17 +136,21 @@ export default function App() {
   // it kicks off a fresh /extract that picks up the newly added example.
   const [extractCycle, setExtractCycle] = useState(0);
 
-  // Load document list and definitions on mount. AbortController cancels
-  // in-flight fetches if the component unmounts (HMR / route change), avoiding
-  // late state writes against an unmounted tree.
+  // Load document list and definitions whenever a connection is (re)established.
+  // Gated on `online === true` so we don't fire fetches before the first probe
+  // resolves or while the backend is unreachable. `reloadKey` re-triggers the
+  // effect on every transition into "online" so a recovered backend repopulates
+  // the panels without a page reload.
   useEffect(() => {
+    if (online !== true) return;
     const ctrl = new AbortController();
     fetchDocuments({ signal: ctrl.signal })
       .then((docs) => {
         setDocuments(docs);
-        if (docs.length > 0) {
-          setSelectedDocId(docs[0].id);
-        }
+        setSelectedDocId((prev) => {
+          if (prev && docs.some((d) => d.id === prev)) return prev;
+          return docs.length > 0 ? docs[0].id : null;
+        });
       })
       .catch((err) => {
         if (err?.name !== "AbortError") console.error(err);
@@ -146,22 +159,23 @@ export default function App() {
     fetchDefinitions({ signal: ctrl.signal })
       .then((defs) => {
         setDefinitions(defs);
-        if (defs.length > 0) {
-          setSelectedDefId(defs[0].id);
-        }
+        setSelectedDefId((prev) => {
+          if (prev && defs.some((d) => d.id === prev)) return prev;
+          return defs.length > 0 ? defs[0].id : null;
+        });
       })
       .catch((err) => {
         if (err?.name !== "AbortError") console.error(err);
       });
     return () => ctrl.abort();
-  }, []);
+  }, [online, reloadKey]);
 
   // Load document data when selection changes. AbortController kills the
   // in-flight metadata fetch when the user switches docs again before it
   // resolves — saves backend cycles vs. the prior `cancelled` flag, which
   // only suppressed the late state write.
   useEffect(() => {
-    if (!selectedDocId) return;
+    if (!selectedDocId || online !== true) return;
     const ctrl = new AbortController();
     setLoading(true);
     setDocumentData(null);
@@ -200,14 +214,14 @@ export default function App() {
       warmImg.src = "";
       warmImg2.src = "";
     };
-  }, [selectedDocId]);
+  }, [selectedDocId, online, reloadKey]);
 
   // Extract fields when document + definition are both available. Cancels the
   // in-flight POST when inputs change so a stale extraction can't land in
   // state and (more importantly) doesn't keep the backend's concurrency slot
   // occupied longer than necessary.
   useEffect(() => {
-    if (!selectedDocId || !selectedDefId || !documentData) return;
+    if (!selectedDocId || !selectedDefId || !documentData || online !== true) return;
     const ctrl = new AbortController();
     setExtracting(true);
     setExtraction(null);
@@ -227,7 +241,7 @@ export default function App() {
     return () => ctrl.abort();
     // extractCycle is in the dep list so a successful teach can force a
     // fresh extraction via `setExtractCycle(c => c + 1)`.
-  }, [selectedDocId, selectedDefId, documentData, extractCycle]);
+  }, [selectedDocId, selectedDefId, documentData, extractCycle, online, reloadKey]);
 
   const handleSelect = useCallback((id) => {
     setSelectedDocId(id);
@@ -450,8 +464,14 @@ export default function App() {
     return out;
   }, [extraction]);
 
+  const offline = online !== true;
+  // React 19 accepts `inert` as a boolean attribute. Apply it to the entire
+  // app shell whenever we're not confirmed online so keyboard / pointer /
+  // screen-reader interaction is blocked while the overlay is up. The overlay
+  // sits outside the inert subtree so its retry button stays operable.
   return (
     <Theme theme={theme}>
+      <div className="app-shell" inert={offline ? "" : undefined}>
       <Header aria-label="IBM Schema Builder">
         <HeaderName prefix="IBM" href="#" onClick={(e) => e.preventDefault()}>
           Schema Builder
@@ -592,6 +612,10 @@ export default function App() {
           }
           onClose={() => setBatchDocs(null)}
         />
+      )}
+      </div>
+      {offline && (
+        <OfflineOverlay online={online} retrying={retrying} onRetry={retry} />
       )}
     </Theme>
   );
