@@ -1994,6 +1994,98 @@ def patch_definition(def_id: str, body: DefinitionBody):
     }
 
 
+class FieldExampleBody(BaseModel):
+    """Body for the click-to-teach endpoint.
+
+    Carries just the example value to append. The field is identified in the
+    URL path so a single endpoint can handle both top-level fields and dotted
+    paths like `line_items.amount` without overloading the body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1)
+
+
+def _resolve_field(fields: list, name: str) -> Optional[dict]:
+    """Locate a field by name within a fields list (no recursion across
+    arrays — top-level only)."""
+    if not isinstance(fields, list):
+        return None
+    for f in fields:
+        if isinstance(f, dict) and f.get("name") == name:
+            return f
+    return None
+
+
+@app.post("/api/definitions/{def_id}/fields/{field_name}/examples")
+def add_field_example(def_id: str, field_name: str, body: FieldExampleBody):
+    """Append a value to a field's `examples` list (click-to-teach).
+
+    Supports a dotted path for one level of array sub-fields, e.g.
+    ``line_items.amount`` resolves to the ``amount`` sub-field of the
+    ``line_items`` array. Refuses duplicates with 409 so a repeated click
+    doesn't silently no-op (the caller can swallow the 409 if it prefers
+    idempotent behavior).
+
+    Write-side is serialized on `_definitions_lock` and persisted via
+    `_atomic_write_json`, matching every other definition mutation.
+    """
+    _validate_def_id_shape(def_id)
+    filepath = DEFINITIONS_DIR / f"{def_id}.json"
+
+    parts = field_name.split(".")
+    if len(parts) > 2 or any(not p for p in parts):
+        raise HTTPException(
+            status_code=400,
+            detail="field_name must be 'name' or 'array.subname'.",
+        )
+
+    with _definitions_lock:
+        if not filepath.exists():
+            raise HTTPException(status_code=404, detail="Definition not found")
+        with open(filepath) as f:
+            definition = json.load(f)
+        doc_fields = definition.get("document", {}).get("fields", [])
+        field = _resolve_field(doc_fields, parts[0])
+        if not field:
+            raise HTTPException(
+                status_code=404, detail=f"Field '{parts[0]}' not found"
+            )
+        if len(parts) == 2:
+            if field.get("type") != "array":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Field '{parts[0]}' is not an array; cannot use dotted path.",
+                )
+            sub = _resolve_field(field.get("fields", []), parts[1])
+            if not sub:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Sub-field '{parts[1]}' not found on '{parts[0]}'.",
+                )
+            field = sub
+
+        examples = field.setdefault("examples", [])
+        if body.value in examples:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Example {body.value!r} already exists for field '{field_name}'.",
+            )
+        examples.append(body.value)
+        _atomic_write_json(filepath, definition)
+        global _definitions_cache, _definitions_signature
+        _definitions_cache = None
+        _definitions_signature = None
+        _signature_cache.clear()
+
+    return {
+        "id": def_id,
+        "field": field_name,
+        "examples": examples,
+    }
+
+
 @app.post("/api/documents/{doc_id}/extract")
 def extract_fields(doc_id: str, body: ExtractRequest):
     """Extract fields from a document using a definition.
@@ -2051,6 +2143,11 @@ def extract_fields(doc_id: str, body: ExtractRequest):
         "fields": fields,
         "page_dimensions": text_data["page_dimensions"],
         "target_tables": target_table_names,
+        # Full text entry list so the frontend can offer "click to teach as
+        # an example" against any extracted block, not just the ones we
+        # already matched. Cheap to include — it's already computed and
+        # cached for this call.
+        "text_entries": text_data.get("text_entries", []),
     }
     # Surface a failure from the Docling pipeline so the frontend can tell
     # "no matches because nothing matched" apart from "no matches because

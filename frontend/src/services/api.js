@@ -213,6 +213,24 @@ export async function deleteDefinition(defId, { signal } = {}) {
   return res.json();
 }
 
+// Append a value to a field's `examples` list. The field path is either a
+// top-level field name or a one-level dotted path like "line_items.amount".
+// Returns the new examples array on success; throws on 404 (missing
+// field) / 409 (duplicate) so the caller can route those into the UI.
+export async function addFieldExample(defId, fieldPath, value, { signal } = {}) {
+  const res = await request(
+    `/api/definitions/${defId}/fields/${encodeURIComponent(fieldPath)}/examples`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+      signal,
+      errorFallback: "Failed to add example",
+    },
+  );
+  return res.json();
+}
+
 // Run extraction + target_tables transforms and return all rows as JSON.
 // CSV download is a separate function because it returns a blob, not JSON,
 // and needs a longer timeout for the cold-Docling case (mirrors /extract).

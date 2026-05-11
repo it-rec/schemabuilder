@@ -59,11 +59,12 @@ group; each item lists the rationale and the smallest sensible scope.
 
 ---
 
-Status: ideas captured 2026-05-11. Items #1 (Definition Editor),
-#3 (Bounding-box overlay) and #4 (Target-table export) shipped on
-branch `claude/suggest-project-features-HguxY`. #4 added a transform
-engine (`backend/transforms.py`) with built-in `identity`,
-`string_to_date`, `string_to_currency`; a
-`GET /api/documents/{id}/export` endpoint behind the same semaphore
-as `/extract`; and an OverflowMenu in `FieldsPanel` offering JSON
-(all tables) or per-table CSV downloads.
+Status: ideas captured 2026-05-11. Shipped on branch
+`claude/suggest-project-features-HguxY`:
+- #1 Definition Editor (Carbon modal + form, preserves extras)
+- #2 Click-to-teach (overlay every text entry on the page; clicking
+  opens a modal that appends the value to a chosen field's
+  `examples`; the next extract re-runs automatically)
+- #3 Bounding-box overlay (persistent ghost overlays for every match,
+  reverse hover into FieldsPanel, label on active)
+- #4 Target-table export (transform engine + JSON/CSV download)

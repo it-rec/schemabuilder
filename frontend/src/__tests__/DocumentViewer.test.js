@@ -165,6 +165,81 @@ test("hovering an overlay calls onHoverField with the underlying field", () => {
   expect(onHoverField).toHaveBeenLastCalledWith(null);
 });
 
+test("renders a teach target per text entry on the current page and invokes onTeachEntry on click", () => {
+  const textEntries = [
+    {
+      id: 5,
+      text: "ACME Corp.",
+      page: 1,
+      bbox: { l: 50, t: 700, r: 300, b: 680, coord_origin: "BOTTOMLEFT" },
+    },
+    {
+      id: 6,
+      text: "Other page",
+      page: 2,
+      bbox: { l: 50, t: 700, r: 300, b: 680, coord_origin: "BOTTOMLEFT" },
+    },
+  ];
+  const onTeachEntry = jest.fn();
+
+  render(
+    <DocumentViewer
+      docId="abc"
+      documentData={mockDocData}
+      highlightedField={null}
+      onHoverField={() => {}}
+      onTeachEntry={onTeachEntry}
+      textEntries={textEntries}
+      extractedFields={[]}
+      loading={false}
+    />,
+  );
+  loadImage(screen.getByAltText(/page 1 of 3/i));
+
+  expect(screen.queryByTestId("teach-target-6")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByTestId("teach-target-5"));
+  expect(onTeachEntry).toHaveBeenCalledWith({ id: 5, text: "ACME Corp.", page: 1 });
+});
+
+test("teach targets for already-matched entries are pointer-events disabled", () => {
+  const textEntries = [
+    {
+      id: 5,
+      text: "INV-001",
+      page: 1,
+      bbox: { l: 50, t: 700, r: 300, b: 680, coord_origin: "BOTTOMLEFT" },
+    },
+  ];
+  const extractedFields = [
+    {
+      key: "field.invoice_id",
+      label: "invoice id",
+      matched_entry_id: 5,
+      page: 1,
+      bbox: textEntries[0].bbox,
+      field: { name: "invoice_id", matched_entry_id: 5 },
+    },
+  ];
+
+  render(
+    <DocumentViewer
+      docId="abc"
+      documentData={mockDocData}
+      highlightedField={null}
+      onHoverField={() => {}}
+      onTeachEntry={() => {}}
+      textEntries={textEntries}
+      extractedFields={extractedFields}
+      loading={false}
+    />,
+  );
+  loadImage(screen.getByAltText(/page 1 of 3/i));
+
+  expect(screen.getByTestId("teach-target-5")).toHaveClass(
+    "document-viewer__teach-target--matched",
+  );
+});
+
 test("active overlay carries the active class and label", () => {
   const field = { name: "invoice_id", matched_entry_id: 1 };
   const extractedFields = [

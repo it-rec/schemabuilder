@@ -182,6 +182,43 @@
   gap: spacing.$spacing-02;
 }
 
+// ExampleTeacher (modal) styles. Compact list of teachable fields with
+// inline hints so the user can pick without scrolling back to the panel.
+.example-teacher__intro {
+  @include type.type-style("body-compact-01");
+  margin: 0 0 spacing.$spacing-04 0;
+  color: var(--cds-text-primary, #161616);
+}
+
+.example-teacher__value {
+  background: var(--cds-layer-01, #f4f4f4);
+  padding: 0 spacing.$spacing-02;
+  border-radius: 2px;
+  font-family: var(--cds-code-02-font-family, monospace);
+}
+
+.example-teacher__empty {
+  @include type.type-style("body-compact-01");
+  color: var(--cds-text-secondary, #525252);
+  margin: 0;
+}
+
+.example-teacher__option {
+  display: inline-flex;
+  align-items: center;
+  gap: spacing.$spacing-02;
+  flex-wrap: wrap;
+}
+
+.example-teacher__option-name {
+  text-transform: capitalize;
+}
+
+.example-teacher__option-examples {
+  @include type.type-style("label-01");
+  color: var(--cds-text-helper, #6f6f6f);
+}
+
 // DocumentList styles
 .document-list {
   padding: spacing.$spacing-05;
@@ -404,6 +441,36 @@
 .document-viewer__highlight--active {
   background: rgba(15, 98, 254, 0.25);
   border: 2px solid #0f62fe;
+}
+
+// Invisible click target overlaid on each Docling text entry. Sits below
+// the matched-field highlight overlays so unmatched text is still
+// discoverable — hover surfaces a dashed outline + pointer to invite
+// teaching.
+.document-viewer__teach-target {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 1px dashed transparent;
+  cursor: pointer;
+  z-index: 1; // below the matched-field highlight, above the image
+
+  &:hover {
+    background: rgba(36, 161, 72, 0.08);
+    border-color: rgba(36, 161, 72, 0.7);
+  }
+
+  &:focus-visible {
+    @include focus-ring;
+  }
+}
+
+// Suppress hover affordance for entries that are already matched — they
+// already have a ghost overlay and clicking would teach a duplicate. The
+// target stays mounted so screen readers can still discover the action.
+.document-viewer__teach-target--matched {
+  pointer-events: none;
 }
 
 .document-viewer__highlight-label {

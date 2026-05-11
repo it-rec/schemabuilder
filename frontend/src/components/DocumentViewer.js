@@ -8,6 +8,8 @@ export default function DocumentViewer({
   documentData,
   highlightedField,
   onHoverField,
+  onTeachEntry,
+  textEntries,
   extractedFields,
   loading,
 }) {
@@ -124,6 +126,27 @@ export default function DocumentViewer({
 
   const highlightedEntryId = highlightedField?.matched_entry_id ?? null;
 
+  // Click-to-teach targets: every text entry on the current page that has a
+  // bbox we can project. Matched entries already have a ghost overlay, but
+  // the teach targets sit underneath at a lower z-index so unmatched text is
+  // discoverable too. Hover reveals a dashed outline + pointer cursor.
+  const teachTargets = useMemo(() => {
+    if (!onTeachEntry || !textEntries?.length) return [];
+    const matched = new Set(
+      (extractedFields || [])
+        .map((f) => f.matched_entry_id)
+        .filter((id) => id != null),
+    );
+    return textEntries
+      .filter((e) => e.page === currentPage && e.bbox)
+      .map((e) => ({
+        ...e,
+        rect: projectBbox(e.bbox),
+        alreadyMatched: matched.has(e.id),
+      }))
+      .filter((e) => e.rect);
+  }, [onTeachEntry, textEntries, extractedFields, currentPage, projectBbox]);
+
   const pageImageUrl = useMemo(
     () => (docId ? getPageImageUrl(docId, currentPage) : null),
     [docId, currentPage],
@@ -200,6 +223,27 @@ export default function DocumentViewer({
             fetchpriority="high"
             decoding="async"
           />
+          {teachTargets.map((e) => (
+            <button
+              key={`teach-${e.id}`}
+              type="button"
+              className={
+                "document-viewer__teach-target" +
+                (e.alreadyMatched ? " document-viewer__teach-target--matched" : "")
+              }
+              data-testid={`teach-target-${e.id}`}
+              aria-label={`Teach "${e.text}" as an example`}
+              title={`Click to teach "${e.text}" as an example for a field.`}
+              style={{
+                position: "absolute",
+                left: `${e.rect.left}px`,
+                top: `${e.rect.top}px`,
+                width: `${e.rect.width}px`,
+                height: `${e.rect.height}px`,
+              }}
+              onClick={() => onTeachEntry({ id: e.id, text: e.text, page: e.page })}
+            />
+          ))}
           {pageOverlays.map((f) => {
             const isActive = highlightedEntryId === f.matched_entry_id;
             return (

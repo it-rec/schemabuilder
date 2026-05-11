@@ -12,6 +12,7 @@ import DocumentList from "./components/DocumentList";
 import DocumentViewer from "./components/DocumentViewer";
 import FieldsPanel from "./components/FieldsPanel";
 import DefinitionEditor from "./components/DefinitionEditor";
+import ExampleTeacher from "./components/ExampleTeacher";
 import {
   fetchDocuments,
   fetchDocument,
@@ -42,6 +43,16 @@ export default function App() {
   // "edit". Tracking the mode separately from `open` keeps the modal's body
   // logic (hydrate-on-open) simple and lets the dialog tear down cleanly.
   const [editorMode, setEditorMode] = useState(null);
+
+  // Click-to-teach: the text entry the user clicked. Null when the teacher
+  // modal is closed. Storing the entry (not just open/closed) lets the modal
+  // render the chosen text without needing a second prop.
+  const [teachEntry, setTeachEntry] = useState(null);
+
+  // Counter that forces the extract effect to re-run after a successful
+  // teach. Bumping this is enough — the effect depends on `extractCycle`, so
+  // it kicks off a fresh /extract that picks up the newly added example.
+  const [extractCycle, setExtractCycle] = useState(0);
 
   // Load document list and definitions on mount. AbortController cancels
   // in-flight fetches if the component unmounts (HMR / route change), avoiding
@@ -141,7 +152,9 @@ export default function App() {
         if (!ctrl.signal.aborted) setExtracting(false);
       });
     return () => ctrl.abort();
-  }, [selectedDocId, selectedDefId, documentData]);
+    // extractCycle is in the dep list so a successful teach can force a
+    // fresh extraction via `setExtractCycle(c => c + 1)`.
+  }, [selectedDocId, selectedDefId, documentData, extractCycle]);
 
   const handleSelect = useCallback((id) => {
     setSelectedDocId(id);
@@ -167,6 +180,18 @@ export default function App() {
       console.error(err);
       return null;
     }
+  }, []);
+
+  const handleTeachEntry = useCallback((entry) => {
+    setTeachEntry(entry);
+  }, []);
+
+  const handleTeachSaved = useCallback(() => {
+    setTeachEntry(null);
+    // The definition changed — re-run extraction so the newly taught
+    // example takes effect immediately. The backend already invalidated the
+    // definitions cache on its end.
+    setExtractCycle((c) => c + 1);
   }, []);
 
   const handleEditorSaved = useCallback(
@@ -353,6 +378,8 @@ export default function App() {
               documentData={viewerData}
               highlightedField={highlightedField}
               onHoverField={handleHoverField}
+              onTeachEntry={selectedDefId ? handleTeachEntry : null}
+              textEntries={extraction?.text_entries}
               extractedFields={extractedFields}
               loading={loading}
             />
@@ -380,6 +407,16 @@ export default function App() {
           onClose={() => setEditorMode(null)}
           onSaved={handleEditorSaved}
           onDeleted={handleEditorDeleted}
+        />
+      )}
+      {teachEntry != null && (
+        <ExampleTeacher
+          open
+          entry={teachEntry}
+          definitionId={selectedDefId}
+          extraction={extraction}
+          onClose={() => setTeachEntry(null)}
+          onSaved={handleTeachSaved}
         />
       )}
     </Theme>
