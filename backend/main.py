@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import os
+import pkgutil
 import re
 import shutil
 import tempfile
@@ -632,16 +633,92 @@ def _resolve_accelerator_device(AcceleratorDevice):
     return getattr(AcceleratorDevice, "AUTO", AcceleratorDevice.CPU)
 
 
+def _format_import_error(exc: BaseException) -> str:
+    """Render an ImportError + its cause chain on a single line.
+
+    A bare `ImportError`'s `str()` may be just `"No module named 'foo'"`, but
+    when a docling submodule fails to import because *one of its own*
+    transitive imports broke (e.g. an optional ML dep), Python chains the
+    original error onto `__cause__`/`__context__`. We want the deepest message
+    to surface in our warm-up log line so the user can act on it (install the
+    missing dep, downgrade docling, etc.) instead of seeing only an opaque
+    "(not importable)" label.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        parts.append(f"{type(cur).__name__}: {cur}")
+        cur = cur.__cause__ or cur.__context__
+    return " <- ".join(parts)
+
+
+# Cache the result of a full docling submodule walk per (sorted-name) request
+# so a single _build_text_converter invocation doesn't pay for three walks.
+# Keyed by the tuple of names; value is the module object that satisfied them,
+# or None if no walk has found a match.
+_docling_walk_cache: dict[tuple[str, ...], Any] = {}
+_docling_walk_lock = threading.Lock()
+
+
+def _walk_docling_for_symbols(names: tuple[str, ...]) -> Any | None:
+    """Last-ditch: walk every importable submodule of `docling` looking for a
+    module that exposes all of `names`.
+
+    Used when the hint paths in `_import_docling_symbols` all fail to satisfy
+    the request. The walk is cached per name-tuple so subsequent calls in the
+    same process pay only a dict lookup. Returns the module or None.
+
+    Submodules that fail to import are skipped silently — `_import_docling_symbols`
+    is responsible for reporting *why* the well-known paths failed; the walker's
+    job is purely to find a working location.
+    """
+    key = tuple(names)
+    if key in _docling_walk_cache:
+        return _docling_walk_cache[key]
+    with _docling_walk_lock:
+        if key in _docling_walk_cache:
+            return _docling_walk_cache[key]
+        found: Any | None = None
+        try:
+            root = importlib.import_module("docling")
+        except ImportError:
+            _docling_walk_cache[key] = None
+            return None
+        # `walk_packages` also returns the root; check it first.
+        candidates = [root]
+        root_path = getattr(root, "__path__", None)
+        if root_path is not None:
+            for _finder, modname, _ispkg in pkgutil.walk_packages(
+                root_path, prefix="docling."
+            ):
+                try:
+                    candidates.append(importlib.import_module(modname))
+                except Exception:
+                    continue
+        for mod in candidates:
+            if all(getattr(mod, n, None) is not None for n in names):
+                found = mod
+                break
+        _docling_walk_cache[key] = found
+        return found
+
+
 def _import_docling_symbols(paths: tuple[str, ...], names: tuple[str, ...]) -> tuple:
     """Find the first docling submodule in `paths` that exposes ALL `names`.
 
     Docling reshuffles where its public symbols live across releases (and
     between the `docling` metapackage and `docling-slim`). Rather than hard-code
     one location and re-break every time it moves, walk a list of candidate
-    module paths and pick the first that satisfies the requested symbols.
-    Raises `ModuleNotFoundError` if none do, so the caller's existing warm-up
-    `try/except` logs a single actionable error instead of leaking a generic
-    `ImportError` for whichever symbol happened to break first.
+    module paths and pick the first that satisfies the requested symbols. If
+    none do, fall back to a full `pkgutil.walk_packages` sweep of the `docling`
+    package — this catches layout drift that hasn't been added to the hint
+    list yet, so a future docling release doesn't crash warm-up the moment it
+    ships. Raises `ModuleNotFoundError` if even the walker comes up empty, so
+    the caller's existing warm-up `try/except` logs a single actionable error
+    rather than leaking a generic `ImportError` for whichever symbol happened
+    to break first.
     """
     last_err: Exception | None = None
     tried: list[str] = []
@@ -650,13 +727,23 @@ def _import_docling_symbols(paths: tuple[str, ...], names: tuple[str, ...]) -> t
             module = importlib.import_module(path)
         except ImportError as exc:
             last_err = exc
-            tried.append(f"{path} (not importable)")
+            tried.append(f"{path} (import failed: {_format_import_error(exc)})")
             continue
         resolved = tuple(getattr(module, n, None) for n in names)
         if all(r is not None for r in resolved):
             return resolved
         missing = [n for n, r in zip(names, resolved, strict=True) if r is None]
         tried.append(f"{path} (missing: {', '.join(missing)})")
+    found = _walk_docling_for_symbols(names)
+    if found is not None:
+        logger.warning(
+            "Docling symbols %s not at any known path; resolved via submodule "
+            "walk at %r. Tried: %s",
+            names,
+            getattr(found, "__name__", repr(found)),
+            "; ".join(tried),
+        )
+        return tuple(getattr(found, n) for n in names)
     raise ModuleNotFoundError(
         "Could not locate docling symbols "
         f"{names} in any of: {'; '.join(tried)}"

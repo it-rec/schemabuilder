@@ -836,6 +836,7 @@ def test_import_docling_symbols_raises_actionable_error_when_all_paths_fail(
     # Empty fake modules: importable, but missing the symbol.
     monkeypatch.setitem(sys.modules, "docling", types.SimpleNamespace())
     monkeypatch.setitem(sys.modules, "docling.datamodel", types.SimpleNamespace())
+    main._docling_walk_cache.clear()
 
     with pytest.raises(ModuleNotFoundError) as excinfo:
         main._import_docling_symbols(
@@ -845,6 +846,112 @@ def test_import_docling_symbols_raises_actionable_error_when_all_paths_fail(
     assert "DefinitelyNotAThing" in msg
     assert "docling.datamodel" in msg
     assert "docling" in msg
+
+
+def test_import_docling_symbols_diagnostic_includes_underlying_cause(
+    monkeypatch, tmp_path
+):
+    """Mirrors the user-reported Windows failure mode: a docling submodule
+    exists but raises ImportError at import time because *one of its own*
+    transitive imports is broken. The diagnostic must surface the underlying
+    cause so the operator can fix it (install the missing dep, downgrade
+    docling, etc.) instead of seeing only "(not importable)".
+    """
+    # Build a real on-disk docling package whose pipeline_options submodule
+    # imports a missing dep. Using real files (instead of a meta-path finder)
+    # avoids the "parent is not a package" lookup short-circuit that bites
+    # `sys.modules` fakes lacking `__path__`.
+    pkg = tmp_path / "docling"
+    (pkg / "datamodel").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "datamodel" / "__init__.py").write_text("")
+    (pkg / "datamodel" / "pipeline_options.py").write_text(
+        "import missing_dep_xyz  # noqa: F401\n"
+    )
+
+    for name in list(sys.modules):
+        if name == "docling" or name.startswith("docling."):
+            sys.modules.pop(name, None)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    main._docling_walk_cache.clear()
+
+    try:
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            main._import_docling_symbols(
+                ("docling.datamodel.pipeline_options",), ("PdfPipelineOptions",)
+            )
+    finally:
+        for name in list(sys.modules):
+            if name == "docling" or name.startswith("docling."):
+                sys.modules.pop(name, None)
+        main._docling_walk_cache.clear()
+
+    msg = str(excinfo.value)
+    # The user must be able to see the *real* cause, not a generic label.
+    assert "missing_dep_xyz" in msg, msg
+    assert "import failed" in msg, msg
+
+
+def test_import_docling_symbols_walks_submodules_as_last_resort(monkeypatch):
+    """When none of the hinted paths satisfy a symbol request, the resolver
+    must walk every submodule of the installed `docling` package and pick the
+    first one that exposes the names. This is the safety net that keeps
+    warm-up alive across unknown future docling layouts — without it, each
+    refactor inside docling is a new production incident.
+    """
+
+    class _Symbol:
+        pass
+
+    # Stand up a fake docling package on disk so pkgutil.walk_packages can
+    # discover its submodules. The symbol lives on a deliberately obscure
+    # submodule that is NOT in the hint list, so only the walker can find it.
+    import tempfile
+
+    pkg_dir = tempfile.mkdtemp(prefix="fake_docling_")
+    pkg_path = Path(pkg_dir) / "docling"
+    pkg_path.mkdir()
+    (pkg_path / "__init__.py").write_text("")
+    obscure = pkg_path / "secret_new_layout.py"
+    obscure.write_text("class PdfPipelineOptions:\n    pass\n")
+
+    # Remove any cached docling modules and point importlib at our temp pkg.
+    for name in list(sys.modules):
+        if name == "docling" or name.startswith("docling."):
+            sys.modules.pop(name, None)
+    monkeypatch.syspath_prepend(pkg_dir)
+    main._docling_walk_cache.clear()
+
+    try:
+        (resolved,) = main._import_docling_symbols(
+            ("docling.datamodel.pipeline_options",),  # not present in fake pkg
+            ("PdfPipelineOptions",),
+        )
+        assert resolved.__name__ == "PdfPipelineOptions"
+    finally:
+        # Don't leave the temp docling poisoning later tests.
+        for name in list(sys.modules):
+            if name == "docling" or name.startswith("docling."):
+                sys.modules.pop(name, None)
+        main._docling_walk_cache.clear()
+
+
+def test_format_import_error_walks_cause_chain():
+    """The chain formatter must surface the deepest cause in the rendered
+    string, because that's the one the user can act on (e.g. `pip install
+    missing-thing`). Without this, "(not importable)" hides the only useful
+    bit of information.
+    """
+    root = ImportError("No module named 'foo'")
+    mid = ImportError("cannot import bar")
+    mid.__cause__ = root
+    top = ImportError("docling pipeline init failed")
+    top.__cause__ = mid
+
+    rendered = main._format_import_error(top)
+    assert "docling pipeline init failed" in rendered
+    assert "cannot import bar" in rendered
+    assert "No module named 'foo'" in rendered
 
 
 # ── _convert_to_pdf (pywin32 / Office COM fake) ─────────────────────────
