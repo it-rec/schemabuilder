@@ -103,3 +103,9 @@ Status: ideas captured 2026-05-11. Shipped on branch
   SDK with structured outputs + prompt caching; lazy import so the
   SDK isn't a hard dependency; `SCHEMABUILDER_LLM_MODEL` /
   `_LLM_ENABLED` env knobs; FieldsPanel surfaces an "LLM" tag)
+- #12 Definition version history (every overwrite / patch / delete
+  snapshots the previous content to `definitions/.versions/{id}/`
+  with a timestamp-ms filename; GET .../versions lists metadata,
+  GET .../versions/{id} returns the full content; the editor gains
+  a History modal with a side-by-side recursive-sorted-JSON diff
+  and a Restore-this-version button that PATCHes back)

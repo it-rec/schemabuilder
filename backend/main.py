@@ -300,6 +300,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_documents"
 DEFINITIONS_DIR = Path(__file__).parent / "definitions"
+# Version archive lives inside DEFINITIONS_DIR under a hidden subdir. Both
+# the dir-signature scan and the loader filter on the .json suffix, so the
+# subdirectory itself is invisible to them; only its contents (also .json)
+# would be read, but they live one level deeper and aren't iterated.
+_VERSIONS_SUBDIR = ".versions"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
 
 # Hard caps on the per-doc caches so a long-running process or a directory of
@@ -2140,6 +2145,13 @@ def delete_definition(def_id: str):
     with _definitions_lock:
         if not filepath.exists():
             raise HTTPException(status_code=404, detail="Definition not found")
+        # Archive before unlinking so the user can resurrect the
+        # definition by POSTing the archived content.
+        try:
+            with open(filepath) as f:
+                _archive_version(def_id, "delete", json.load(f))
+        except (OSError, ValueError):
+            logger.exception("Could not archive %s before delete", def_id)
         try:
             filepath.unlink()
         except OSError as e:
@@ -2250,6 +2262,108 @@ def _atomic_write_json(filepath: Path, payload: dict) -> None:
         raise
 
 
+_VERSION_FILENAME_RE = re.compile(r"^(\d+)-([a-z]+)\.json$")
+
+
+def _versions_dir_for(def_id: str) -> Path:
+    """Per-definition revision archive. Lives under DEFINITIONS_DIR but in
+    a hidden `.versions/<def_id>/` subdir so it doesn't pollute the
+    definition listing or signature scan."""
+    return DEFINITIONS_DIR / _VERSIONS_SUBDIR / def_id
+
+
+def _archive_version(def_id: str, action: str, payload: dict) -> Optional[Path]:
+    """Snapshot a definition's pre-mutation contents to the version dir.
+
+    Filename is `{timestamp_ms}-{action}.json`; timestamp doubles as the
+    revision id surfaced via the API. We deliberately archive the OLD
+    contents (the about-to-be-replaced state) so the most recent version
+    file is what the active definition was right before this mutation —
+    if the user wants to roll back, they restore the most recent version.
+
+    Returns the written path (or None on filesystem failure — archiving
+    must never block a mutation).
+    """
+    try:
+        vdir = _versions_dir_for(def_id)
+        vdir.mkdir(parents=True, exist_ok=True)
+        ts_ms = int(time.time() * 1000)
+        # Loop-protect against clock-resolution collisions when two writes
+        # land in the same millisecond.
+        for attempt in range(5):
+            candidate = vdir / f"{ts_ms + attempt}-{action}.json"
+            if not candidate.exists():
+                _atomic_write_json(candidate, payload)
+                return candidate
+    except Exception:
+        logger.exception("Failed to archive version for %s", def_id)
+    return None
+
+
+def _list_versions(def_id: str) -> list:
+    """List archived versions for a definition, newest first. Metadata
+    only (no content) — clients fetch a specific version separately when
+    they want to render it."""
+    vdir = _versions_dir_for(def_id)
+    if not vdir.exists():
+        return []
+    out = []
+    try:
+        for f in vdir.iterdir():
+            m = _VERSION_FILENAME_RE.match(f.name)
+            if not m:
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            out.append(
+                {
+                    "id": f.name[:-5],  # drop ".json"
+                    "timestamp_ms": int(m.group(1)),
+                    "action": m.group(2),
+                    "size": st.st_size,
+                }
+            )
+    except OSError:
+        return []
+    out.sort(key=lambda v: v["timestamp_ms"], reverse=True)
+    return out
+
+
+def _read_version(def_id: str, version_id: str) -> Optional[dict]:
+    """Load one archived version's full content. Returns None if the
+    version file is missing or unparseable."""
+    if not _VERSION_FILENAME_RE.match(version_id + ".json"):
+        return None
+    path = _versions_dir_for(def_id) / f"{version_id}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+@app.get("/api/definitions/{def_id}/versions")
+def list_definition_versions(def_id: str):
+    """List the revision archive for a definition (newest first).
+    Returns metadata only; the content is fetched per-version."""
+    _validate_def_id_shape(def_id)
+    return {"items": _list_versions(def_id), "id": def_id}
+
+
+@app.get("/api/definitions/{def_id}/versions/{version_id}")
+def get_definition_version(def_id: str, version_id: str):
+    """Fetch one archived version's full content."""
+    _validate_def_id_shape(def_id)
+    payload = _read_version(def_id, version_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return payload
+
+
 @app.post("/api/definitions")
 def create_definition(
     body: DefinitionBody,
@@ -2290,6 +2404,14 @@ def create_definition(
                     f"Use PATCH /api/definitions/{def_id} or POST with ?overwrite=true."
                 ),
             )
+        # If this is a forced overwrite, archive the about-to-be-replaced
+        # content first so users can roll back.
+        if filepath.exists():
+            try:
+                with open(filepath) as f:
+                    _archive_version(def_id, "overwrite", json.load(f))
+            except (OSError, ValueError):
+                logger.exception("Could not archive %s before overwrite", def_id)
         _atomic_write_json(filepath, payload)
         global _definitions_cache, _definitions_signature
         _definitions_cache = None
@@ -2318,6 +2440,12 @@ def patch_definition(def_id: str, body: DefinitionBody):
     with _definitions_lock:
         if not filepath.exists():
             raise HTTPException(status_code=404, detail="Definition not found")
+        # Archive the current version so the user can roll back.
+        try:
+            with open(filepath) as f:
+                _archive_version(def_id, "patch", json.load(f))
+        except (OSError, ValueError):
+            logger.exception("Could not archive %s before patch", def_id)
         _atomic_write_json(filepath, payload)
         global _definitions_cache, _definitions_signature
         _definitions_cache = None

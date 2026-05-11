@@ -14,6 +14,7 @@ import DocumentList from "./components/DocumentList";
 import DocumentViewer from "./components/DocumentViewer";
 import FieldsPanel from "./components/FieldsPanel";
 import DefinitionEditor from "./components/DefinitionEditor";
+import DefinitionHistory from "./components/DefinitionHistory";
 import ExampleTeacher from "./components/ExampleTeacher";
 import BatchExtractModal from "./components/BatchExtractModal";
 import {
@@ -48,6 +49,10 @@ export default function App() {
   // "edit". Tracking the mode separately from `open` keeps the modal's body
   // logic (hydrate-on-open) simple and lets the dialog tear down cleanly.
   const [editorMode, setEditorMode] = useState(null);
+  // History modal — open when the user clicks "History" inside the editor.
+  // Stored separately so it can sit on top of the editor (Carbon supports
+  // stacked modals).
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // Click-to-teach: the text entry the user clicked. Null when the teacher
   // modal is closed. Storing the entry (not just open/closed) lets the modal
@@ -552,6 +557,19 @@ export default function App() {
           onClose={() => setEditorMode(null)}
           onSaved={handleEditorSaved}
           onDeleted={handleEditorDeleted}
+          onShowHistory={() => setHistoryOpen(true)}
+        />
+      )}
+      {historyOpen && editorMode === "edit" && selectedDefId && (
+        <DefinitionHistory
+          open
+          definitionId={selectedDefId}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={() => {
+            setHistoryOpen(false);
+            // Force the extract effect to re-run with the restored definition.
+            setExtractCycle((c) => c + 1);
+          }}
         />
       )}
       {teachEntry != null && (

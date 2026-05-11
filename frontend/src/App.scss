@@ -225,6 +225,66 @@
 
 // BatchExtractModal styles. Plain layout — the heavy lifting (progress bar,
 // modal chrome) is Carbon.
+// DefinitionHistory modal — side-by-side: version list on the left,
+// unified-diff pane on the right.
+.definition-history__layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: spacing.$spacing-05;
+}
+
+.definition-history__list {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.definition-history__row {
+  cursor: pointer;
+}
+
+.definition-history__row--selected {
+  background: var(--cds-layer-selected-01, #e0e0e0) !important;
+  box-shadow: inset 3px 0 0 0 var(--cds-border-interactive, #0f62fe);
+}
+
+.definition-history__diff {
+  border: 1px solid var(--cds-border-subtle, #e0e0e0);
+  background: var(--cds-layer-01, #f4f4f4);
+  max-height: 60vh;
+  overflow: auto;
+  padding: spacing.$spacing-03;
+}
+
+.definition-history__diff-pre {
+  margin: 0;
+  @include type.type-style("code-01");
+  font-family: var(--cds-code-02-font-family, monospace);
+  white-space: pre;
+  line-height: 1.4;
+}
+
+.definition-history__diff-removed {
+  display: block;
+  background: var(--cds-notification-background-error, #fff1f1);
+  color: var(--cds-support-error, #da1e28);
+}
+
+.definition-history__diff-added {
+  display: block;
+  background: var(--cds-notification-background-success, #defbe6);
+  color: var(--cds-support-success, #24a148);
+}
+
+.definition-history__diff-same {
+  display: block;
+}
+
+.definition-history__empty {
+  @include type.type-style("body-compact-01");
+  color: var(--cds-text-secondary, #525252);
+  padding: spacing.$spacing-04;
+}
+
 .batch-modal__intro {
   @include type.type-style("body-compact-01");
   margin: 0 0 spacing.$spacing-04 0;

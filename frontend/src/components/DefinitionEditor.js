@@ -416,6 +416,7 @@ export default function DefinitionEditor({
   onClose,
   onSaved, // (savedDef) => void — parent refreshes its list / selection
   onDeleted, // (deletedId) => void
+  onShowHistory, // () => void — caller opens the history modal
 }) {
   const [draft, setDraft] = useState({
     documentType: "",
@@ -617,6 +618,16 @@ export default function DefinitionEditor({
         )}
       </ModalBody>
       <ModalFooter>
+        {mode === "edit" && onShowHistory && (
+          <Button
+            kind="ghost"
+            onClick={onShowHistory}
+            disabled={saving || deleting || loading}
+            data-testid="def-history-button"
+          >
+            History
+          </Button>
+        )}
         {mode === "edit" && (
           <Button
             kind="danger--tertiary"

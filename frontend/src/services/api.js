@@ -240,6 +240,28 @@ export async function updateDefinition(defId, definition, { signal } = {}) {
   return res.json();
 }
 
+// Revision archive. Listing returns metadata only — the JSON content of a
+// version is fetched separately. Both endpoints are idempotent GETs and
+// re-use the retry path from request().
+export async function fetchDefinitionVersions(defId, { signal } = {}) {
+  const res = await request(`/api/definitions/${defId}/versions`, {
+    signal,
+    errorFallback: "Failed to fetch definition versions",
+  });
+  return res.json();
+}
+
+export async function fetchDefinitionVersion(defId, versionId, { signal } = {}) {
+  const res = await request(
+    `/api/definitions/${defId}/versions/${encodeURIComponent(versionId)}`,
+    {
+      signal,
+      errorFallback: "Failed to fetch version",
+    },
+  );
+  return res.json();
+}
+
 export async function deleteDefinition(defId, { signal } = {}) {
   const res = await request(`/api/definitions/${defId}`, {
     method: "DELETE",
