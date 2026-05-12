@@ -540,7 +540,21 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
             ppt = win32com.client.Dispatch("PowerPoint.Application")
             try:
                 presentation = ppt.Presentations.Open(abs_path, WithWindow=False)
-                presentation.SaveAs(str(pdf_path), FileFormat=32)  # 32 = ppSaveAsPDF
+                # ExportAsFixedFormat (not SaveAs FileFormat=ppSaveAsPDF) is
+                # the supported PowerPoint-to-PDF path. SaveAs routes through
+                # the default printer driver on some builds and quantizes the
+                # page size to the driver's paper — a 13.33×7.5in widescreen
+                # slide comes out centered on an 8.5×11in US Letter page, so
+                # Docling's text bboxes (still in the slide's own coordinate
+                # system) end up offset and scaled wrong against the rendered
+                # PNG (which uses the letter-page MediaBox). Intent=Screen (1)
+                # preserves the slide's native dimensions verbatim.
+                presentation.ExportAsFixedFormat(
+                    str(pdf_path),
+                    2,      # FixedFormatType: ppFixedFormatTypePDF
+                    1,      # Intent: ppFixedFormatIntentScreen
+                    False,  # FrameSlides: no border
+                )
                 presentation.Close()
             finally:
                 ppt.Quit()

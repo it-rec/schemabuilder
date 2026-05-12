@@ -1096,26 +1096,39 @@ def test_format_import_error_walks_cause_chain():
 def _install_fake_win32(monkeypatch, app_call_log: list):
     """Inject minimal fake pythoncom + win32com.client modules."""
 
-    class _Doc:
-        def __init__(self, log, ext):
+    class _WordDoc:
+        def __init__(self, log):
             self._log = log
-            self._ext = ext
 
         def SaveAs(self, path, FileFormat=None):
-            self._log.append(("save", path, FileFormat, self._ext))
+            self._log.append(("save", path, FileFormat, ".docx"))
             Path(path).write_bytes(b"%PDF-fake\n%%EOF\n")
 
         def Close(self):
-            self._log.append(("close", self._ext))
+            self._log.append(("close", ".docx"))
+
+    class _PptPresentation:
+        def __init__(self, log):
+            self._log = log
+
+        def ExportAsFixedFormat(
+            self, Path_, FixedFormatType, Intent=1, FrameSlides=False, *args, **kwargs
+        ):
+            self._log.append(
+                ("export-pdf", Path_, FixedFormatType, Intent, FrameSlides)
+            )
+            Path(Path_).write_bytes(b"%PDF-fake\n%%EOF\n")
+
+        def Close(self):
+            self._log.append(("close", ".pptx"))
 
     class _DocsCollection:
-        def __init__(self, log, ext):
+        def __init__(self, log):
             self._log = log
-            self._ext = ext
 
         def Open(self, path):
-            self._log.append(("open", path, self._ext))
-            return _Doc(self._log, self._ext)
+            self._log.append(("open", path, ".docx"))
+            return _WordDoc(self._log)
 
 
     class _PresCollection:
@@ -1124,13 +1137,13 @@ def _install_fake_win32(monkeypatch, app_call_log: list):
 
         def Open(self, path, WithWindow=False):
             self._log.append(("open-ppt", path, WithWindow))
-            return _Doc(self._log, ".pptx")
+            return _PptPresentation(self._log)
 
     class _WordApp:
         Visible = True
 
         def __init__(self):
-            self.Documents = _DocsCollection(app_call_log, ".docx")
+            self.Documents = _DocsCollection(app_call_log)
 
         def Quit(self):
             app_call_log.append(("quit-word",))
@@ -1192,6 +1205,40 @@ def test_convert_to_pdf_pptx_uses_powerpoint(monkeypatch, tmp_path):
     assert pdf is not None
     assert pdf.exists()
     assert ("quit-ppt",) in log
+
+
+def test_convert_to_pdf_pptx_uses_export_with_screen_intent(monkeypatch, tmp_path):
+    """PowerPoint conversion must go through ExportAsFixedFormat with
+    Intent=ppFixedFormatIntentScreen (1), not SaveAs(FileFormat=ppSaveAsPDF).
+
+    SaveAs routes through the default printer driver on some PowerPoint
+    builds, which quantizes the page size to the driver's paper (US Letter
+    / A4) and re-centers the slide inside it. Docling then reads bboxes in
+    the slide's own coordinate frame while the rendered PNG reflects the
+    letter-page MediaBox, so every overlay lands displaced from its text.
+    Intent=Screen preserves slide dimensions verbatim and keeps both views
+    in the same coordinate space.
+    """
+    main._pdf_conversion_cache.clear()
+    monkeypatch.setattr(main, "_pdf_temp_dir", str(tmp_path))
+    log = []
+    _install_fake_win32(monkeypatch, log)
+    src = tmp_path / "widescreen.pptx"
+    src.write_bytes(b"PK")
+    main._convert_to_pdf(src)
+
+    exports = [t for t in log if t[0] == "export-pdf"]
+    assert len(exports) == 1
+    _, _path, fixed_format_type, intent, frame_slides = exports[0]
+    # ppFixedFormatTypePDF
+    assert fixed_format_type == 2
+    # ppFixedFormatIntentScreen — preserves slide dims, doesn't route
+    # through the printer driver.
+    assert intent == 1
+    # No printer-style frame border around each slide.
+    assert frame_slides is False
+    # No SaveAs fallback should have run alongside.
+    assert not any(t[0] == "save" and t[-1] == ".pptx" for t in log)
 
 
 def test_convert_to_pdf_unsupported_extension_returns_none(monkeypatch, tmp_path):
