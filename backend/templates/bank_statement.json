@@ -1,0 +1,54 @@
+{
+  "document": {
+    "document_type": "Bank Statement",
+    "document_description": "A bank account statement listing the account holder, period, opening/closing balances, and a list of transactions.",
+    "fields": [
+      {
+        "name": "account_holder",
+        "description": "Name on the account.",
+        "examples": ["Jane Doe"]
+      },
+      {
+        "name": "account_number",
+        "description": "Account number, IBAN or similar.",
+        "examples": ["DE89 3704 0044 0532 0130 00"],
+        "pattern": "[A-Z]{2}\\d{2}(?:[ ]?\\d{4}){4,7}"
+      },
+      {
+        "name": "period_start",
+        "description": "Start of the statement period.",
+        "examples": ["2024-07-01"],
+        "normalizer": "date"
+      },
+      {
+        "name": "period_end",
+        "description": "End of the statement period.",
+        "examples": ["2024-07-31"],
+        "normalizer": "date"
+      },
+      {
+        "name": "opening_balance",
+        "description": "Account balance at the start of the period.",
+        "examples": ["1234.56"],
+        "normalizer": "currency"
+      },
+      {
+        "name": "closing_balance",
+        "description": "Account balance at the end of the period.",
+        "examples": ["1500.00"],
+        "normalizer": "currency"
+      },
+      {
+        "name": "transactions",
+        "type": "array",
+        "description": "Each line on the statement.",
+        "multi_page": true,
+        "fields": [
+          {"name": "date", "description": "Transaction date.", "examples": ["2024-07-03"], "normalizer": "date"},
+          {"name": "description", "description": "Payee or memo.", "examples": ["AMZN MKTP"]},
+          {"name": "amount", "description": "Signed amount.", "examples": ["-12.34", "100.00"], "normalizer": "currency"}
+        ]
+      }
+    ]
+  }
+}

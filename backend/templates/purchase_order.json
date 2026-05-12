@@ -1,0 +1,55 @@
+{
+  "document": {
+    "document_type": "Purchase Order",
+    "document_description": "A purchase order issued by a buyer to a supplier requesting goods or services at agreed terms.",
+    "fields": [
+      {
+        "name": "po_number",
+        "description": "Unique purchase order identifier.",
+        "examples": ["PO-2024-0017"],
+        "pattern": "(?:PO[- ]?)?[A-Z]?\\d{3,}[-\\d]*"
+      },
+      {
+        "name": "order_date",
+        "description": "Date the PO was issued.",
+        "examples": ["2024-08-12"],
+        "normalizer": "date"
+      },
+      {
+        "name": "delivery_date",
+        "description": "Requested delivery date.",
+        "examples": ["2024-09-01"],
+        "normalizer": "date"
+      },
+      {
+        "name": "buyer",
+        "description": "Issuing organisation.",
+        "examples": ["Acme Corp"]
+      },
+      {
+        "name": "supplier",
+        "description": "Recipient supplier name.",
+        "examples": ["Supplier GmbH"]
+      },
+      {
+        "name": "total",
+        "description": "Total order value.",
+        "examples": ["12345.67"],
+        "normalizer": "currency"
+      },
+      {
+        "name": "line_items",
+        "type": "array",
+        "description": "Each ordered line.",
+        "fields": [
+          {"name": "sku", "description": "Product code.", "examples": ["SKU-123"]},
+          {"name": "description", "description": "Item description.", "examples": ["Office chair"]},
+          {"name": "quantity", "description": "Quantity ordered.", "examples": ["5"], "normalizer": "number"},
+          {"name": "unit_price", "description": "Price per unit.", "examples": ["199.00"], "normalizer": "currency"},
+          {"name": "amount", "description": "Line subtotal.", "examples": ["995.00"], "normalizer": "currency"}
+        ],
+        "multi_page": true
+      }
+    ]
+  }
+}
