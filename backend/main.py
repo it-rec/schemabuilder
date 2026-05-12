@@ -1097,18 +1097,34 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
     Picks the OCR-enabled or no-OCR converter based on a fast pypdfium2 text
     sample. The decision is cached per file signature, so subsequent calls
     pay only a dict lookup.
+
+    For DOCX/PPTX we route through the same Office→PDF conversion the renderer
+    uses, then run Docling's PDF backend on the converted PDF. Docling's
+    SimplePipeline (the office-format path) does not emit positional metadata,
+    so extracting directly from the .docx/.pptx leaves every entry with
+    `bbox=None` — which in turn disables the hover-highlight overlays in the
+    viewer. Extracting from the converted PDF gives us bboxes in the same
+    coordinate space as the rendered PNG, so overlays land correctly.
     """
-    do_ocr = _resolve_ocr_decision(filepath)
+    source_path = filepath
+    if filepath.suffix.lower() in (".docx", ".pptx"):
+        converted = _convert_to_pdf(filepath)
+        if converted is not None and converted.exists():
+            source_path = converted
+        # Conversion failed (no Office, mid-write crash, etc.): fall back to
+        # running Docling on the original file. We lose bboxes but keep text.
+
+    do_ocr = _resolve_ocr_decision(source_path)
     converter = _get_text_converter(do_ocr=do_ocr)
     # PDF pipeline uses pypdfium2 inside Docling; serialize against our own
     # pdfium call sites (renders, metadata, OCR sampling) to keep PDFium's
     # process-global state safe. DOCX/PPTX use SimplePipeline → no pdfium →
     # no lock needed, so they keep running concurrently with PDF work.
-    if filepath.suffix.lower() == ".pdf":
+    if source_path.suffix.lower() == ".pdf":
         with _pdfium_lock:
-            result = converter.convert(str(filepath))
+            result = converter.convert(str(source_path))
     else:
-        result = converter.convert(str(filepath))
+        result = converter.convert(str(source_path))
     doc = result.document
 
     text_entries = []

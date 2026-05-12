@@ -424,6 +424,76 @@ def test_extract_text_iterate_items_can_yield_tuples(monkeypatch, tmp_path):
     assert entries[0]["text"] == "from-tuple"
 
 
+def test_extract_text_docx_runs_on_converted_pdf(monkeypatch, tmp_path):
+    """DOCX/PPTX text extraction must route through _convert_to_pdf so Docling's
+    PDF backend (not the SimplePipeline) processes the file. Otherwise prov
+    bboxes are missing and the viewer's hover-highlight overlays don't render.
+    """
+    src = tmp_path / "report.docx"
+    src.write_bytes(b"PK")
+    converted = tmp_path / "report.docx.pdf"
+    converted.write_bytes(b"%PDF")
+
+    convert_calls = []
+
+    def fake_convert(p):
+        convert_calls.append(p)
+        return converted
+
+    monkeypatch.setattr(main, "_convert_to_pdf", fake_convert)
+
+    bbox = _Bbox(left=1.0, t=2.0, r=3.0, b=4.0, origin="BOTTOMLEFT")
+    fake = _FakeConverter(_FakeDoclingDoc([_TextItem("hi", bbox=bbox)],
+                                          {1: (10.0, 10.0)}))
+    monkeypatch.setitem(main._text_converters, False, fake)
+    monkeypatch.setattr(main, "_resolve_ocr_decision", lambda _p: False)
+
+    entries, dims = main._extract_text(src)
+    assert convert_calls == [src]
+    # Docling saw the converted PDF, not the .docx.
+    assert entries[0]["bbox"] == {"l": 1.0, "t": 2.0, "r": 3.0, "b": 4.0,
+                                   "coord_origin": "BOTTOMLEFT"}
+    assert dims == {1: {"width": 10.0, "height": 10.0}}
+
+
+def test_extract_text_docx_falls_back_when_conversion_unavailable(
+    monkeypatch, tmp_path
+):
+    """If Office isn't installed (e.g. Linux dev box), _convert_to_pdf returns
+    None. Extraction must still run on the original .docx so the user at least
+    gets text — only the bbox overlay is degraded."""
+    src = tmp_path / "no-office.docx"
+    src.write_bytes(b"PK")
+    monkeypatch.setattr(main, "_convert_to_pdf", lambda _p: None)
+
+    fake = _FakeConverter(_FakeDoclingDoc([_TextItem("text-only")], {}))
+    monkeypatch.setitem(main._text_converters, False, fake)
+    monkeypatch.setattr(main, "_resolve_ocr_decision", lambda _p: False)
+
+    entries, _ = main._extract_text(src)
+    assert [e["text"] for e in entries] == ["text-only"]
+    assert entries[0]["bbox"] is None
+
+
+def test_extract_text_docx_falls_back_when_converted_file_missing(
+    monkeypatch, tmp_path
+):
+    """If _convert_to_pdf returns a path that doesn't exist on disk (Office
+    died mid-write), we must not feed the ghost path to Docling — fall back
+    to the original .docx like the conversion-unavailable case."""
+    src = tmp_path / "ghost.docx"
+    src.write_bytes(b"PK")
+    ghost = tmp_path / "never-written.pdf"
+    monkeypatch.setattr(main, "_convert_to_pdf", lambda _p: ghost)
+
+    fake = _FakeConverter(_FakeDoclingDoc([_TextItem("text-only")], {}))
+    monkeypatch.setitem(main._text_converters, False, fake)
+    monkeypatch.setattr(main, "_resolve_ocr_decision", lambda _p: False)
+
+    entries, _ = main._extract_text(src)
+    assert [e["text"] for e in entries] == ["text-only"]
+
+
 # ── _get_or_extract_text ────────────────────────────────────────────────
 
 
