@@ -645,7 +645,10 @@ def _render_single_page(pdf_path: str, page_no: int) -> Optional[bytes]:
             bitmap = page.render(scale=2.0)
             pil_image = bitmap.to_pil()
             buf = io.BytesIO()
-            pil_image.save(buf, format="PNG")
+            # compress_level=1 trades ~1.5x output size for a 3-5x faster
+            # encode. Renders are LRU-cached in-process and typically served
+            # over localhost, so wire size is not the limiting factor here.
+            pil_image.save(buf, format="PNG", compress_level=1)
             return buf.getvalue()
         finally:
             pdf_doc.close()
@@ -2460,6 +2463,10 @@ async def upload_document(file: UploadFile = FastAPIFile(...)):
 
     _invalidate_doc_listing_cache()
     doc_id = _get_document_id(target.name)
+    # Warm the render + text caches in the background so the user's first
+    # click on the new document doesn't wait for Docling + page rasterization.
+    # The helper dedupes per doc_id and swallows its own errors.
+    _kick_background_prefetch(doc_id, target)
     return {
         "id": doc_id,
         "filename": target.name,

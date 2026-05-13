@@ -35,7 +35,7 @@ class _FakePilImage:
     def __init__(self, data: bytes):
         self._data = data
 
-    def save(self, buf, format=None):
+    def save(self, buf, format=None, **kwargs):
         buf.write(self._data)
 
 
