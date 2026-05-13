@@ -156,6 +156,107 @@ def test_delete_unknown_doc_returns_404(client):
     assert client.delete("/api/documents/nope").status_code == 404
 
 
+def test_upload_with_tiny_chunk_size_still_persists_full_body(client, monkeypatch):
+    """The read-loop must work for any chunk size; shrink the chunk to 4 bytes
+    and post a body that needs multiple loop iterations to land. Catches
+    regressions where the loop is sized to read everything in one shot."""
+    monkeypatch.setattr(main, "_UPLOAD_CHUNK_BYTES", 4)
+    body = _PDF_BYTES + b"-extra-bytes-to-force-many-iterations"
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("chunky.pdf", BytesIO(body), "application/pdf")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["size"] == len(body)
+    on_disk = main.TEST_DOCS_DIR / "chunky.pdf"
+    assert on_disk.exists()
+    assert on_disk.read_bytes() == body
+
+
+def test_upload_invokes_posix_fadvise_after_prefetch(monkeypatch, tmp_path):
+    """After the prefetch job warms the in-memory caches, the kernel page-
+    cache hint must fire so the file's bytes can be reclaimed. On platforms
+    without posix_fadvise the path skips silently — verified by deleting the
+    attribute and confirming no AttributeError."""
+    import threading as _threading
+
+    monkeypatch.setattr(main, "TEST_DOCS_DIR", tmp_path / "docs")
+    main.TEST_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    main._prefetch_inflight.clear()
+    p = main.TEST_DOCS_DIR / "fadv.pdf"
+    p.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    doc_id = main._get_document_id(p.name)
+    main._render_cache[doc_id] = {
+        "filename": p.name,
+        "num_pages": 1,
+        "page_dimensions": {1: {"width": 1, "height": 1}},
+        "pdf_path": str(p),
+        "page_images": {},
+        "_sig": main._file_signature(p),
+        "_render_lock": _threading.Lock(),
+    }
+    monkeypatch.setattr(main, "_render_page", lambda fp, pn: b"")
+    monkeypatch.setattr(main, "_get_or_extract_text", lambda fp: {})
+
+    class _Sync:
+        def submit(self, fn, *a, **kw):
+            fn(*a, **kw)
+            return None
+
+    monkeypatch.setattr(main, "_bg_executor", _Sync())
+
+    fadvise_calls = []
+
+    def _fake_fadvise(fd, offset, length, advice):
+        fadvise_calls.append((offset, length, advice))
+
+    monkeypatch.setattr(main.os, "posix_fadvise", _fake_fadvise, raising=False)
+    main.os.POSIX_FADV_DONTNEED = getattr(main.os, "POSIX_FADV_DONTNEED", 4)
+
+    main._kick_background_prefetch(doc_id, p)
+    assert len(fadvise_calls) == 1
+    assert fadvise_calls[0] == (0, 0, main.os.POSIX_FADV_DONTNEED)
+    assert doc_id not in main._prefetch_inflight
+
+
+def test_upload_prefetch_runs_cleanly_without_posix_fadvise(monkeypatch, tmp_path):
+    """macOS / Windows lack posix_fadvise; the prefetch job must still
+    complete and clear its inflight marker."""
+    import threading as _threading
+
+    monkeypatch.setattr(main, "TEST_DOCS_DIR", tmp_path / "docs")
+    main.TEST_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    main._prefetch_inflight.clear()
+    p = main.TEST_DOCS_DIR / "nofadv.pdf"
+    p.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    doc_id = main._get_document_id(p.name)
+    main._render_cache[doc_id] = {
+        "filename": p.name,
+        "num_pages": 1,
+        "page_dimensions": {1: {"width": 1, "height": 1}},
+        "pdf_path": str(p),
+        "page_images": {},
+        "_sig": main._file_signature(p),
+        "_render_lock": _threading.Lock(),
+    }
+    monkeypatch.setattr(main, "_render_page", lambda fp, pn: b"")
+    monkeypatch.setattr(main, "_get_or_extract_text", lambda fp: {})
+
+    class _Sync:
+        def submit(self, fn, *a, **kw):
+            fn(*a, **kw)
+            return None
+
+    monkeypatch.setattr(main, "_bg_executor", _Sync())
+
+    # Simulate a platform without posix_fadvise.
+    if hasattr(main.os, "posix_fadvise"):
+        monkeypatch.delattr(main.os, "posix_fadvise")
+
+    main._kick_background_prefetch(doc_id, p)
+    assert doc_id not in main._prefetch_inflight
+
+
 def test_delete_purges_render_and_text_caches(client, monkeypatch):
     """A re-upload under the same filename produces the same doc_id; the
     previous extraction's text/render entries must not bleed through."""

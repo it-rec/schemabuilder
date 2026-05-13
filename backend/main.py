@@ -129,6 +129,14 @@ _MAX_BODY_BYTES = max(1024, int(os.getenv("SCHEMABUILDER_MAX_BODY_BYTES") or 2_0
 # PPTX file, which routinely exceeds the JSON-payload cap. Default 50 MB.
 _MAX_DOC_BYTES = max(1024, int(os.getenv("SCHEMABUILDER_MAX_DOC_BYTES") or 50_000_000))
 
+# Chunk size for streaming uploaded bodies to disk. 4 MiB balances fewer
+# `await file.read()` round-trips and fewer write() syscalls against a
+# bounded per-request buffer. Stays well under _MAX_DOC_BYTES so even
+# tiny custom caps still loop sensibly.
+_UPLOAD_CHUNK_BYTES = max(
+    1, int(os.getenv("SCHEMABUILDER_UPLOAD_CHUNK_BYTES") or (4 << 20))
+)
+
 # Strict allow-list for X-Request-ID: hex/ascii-safe so we don't propagate
 # header-injection junk into log lines or downstream tracers.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._\-]{1,64}$")
@@ -1492,6 +1500,28 @@ def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
                 finally:
                     _extract_semaphore.release()
         finally:
+            # The Python-level render/text caches now hold what we need from
+            # this file; hint the kernel that it can drop the file's pages
+            # from the page cache. Done AFTER prefetch so the cache stays
+            # warm for the rasterization/extraction we just did. Linux-only;
+            # macOS/Windows skip the call silently.
+            if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+                try:
+                    fadv_fd = os.open(str(filepath), os.O_RDONLY)
+                except OSError:
+                    pass
+                else:
+                    try:
+                        os.posix_fadvise(
+                            fadv_fd, 0, 0, os.POSIX_FADV_DONTNEED
+                        )
+                    except OSError:
+                        pass
+                    finally:
+                        try:
+                            os.close(fadv_fd)
+                        except OSError:
+                            pass
             with _prefetch_inflight_lock:
                 _prefetch_inflight.discard(doc_id)
 
@@ -2437,21 +2467,36 @@ async def upload_document(file: UploadFile = FastAPIFile(...)):
     )
     tmp_path = Path(tmp_path_str)
     written = 0
+    fd_closed = False
+    # Write directly via os.write rather than wrapping the fd in a
+    # BufferedWriter — at multi-MiB chunks the inner 8 KiB buffer is just
+    # an extra memcpy per chunk with no batching benefit.
     try:
-        with os.fdopen(tmp_fd, "wb") as out:
-            while True:
-                chunk = await file.read(1 << 20)  # 1 MB
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > _MAX_DOC_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Upload exceeds {_MAX_DOC_BYTES} bytes.",
-                    )
-                out.write(chunk)
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > _MAX_DOC_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Upload exceeds {_MAX_DOC_BYTES} bytes.",
+                )
+            # os.write may return fewer bytes than requested; loop until
+            # the whole chunk is on disk.
+            view = memoryview(chunk)
+            while view:
+                n = os.write(tmp_fd, view)
+                view = view[n:]
+        os.close(tmp_fd)
+        fd_closed = True
         os.replace(tmp_path, target)
     except Exception:
+        if not fd_closed:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
         try:
             tmp_path.unlink(missing_ok=True)
         except OSError:
