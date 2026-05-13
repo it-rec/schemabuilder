@@ -257,10 +257,17 @@ eslint, or vitest. Treat the sanity check as the gate.
 
 For reference — keep parity with this:
 
-| Job      | Steps                                                                  |
-| -------- | ---------------------------------------------------------------------- |
-| backend  | `pip install fastapi pydantic pytest httpx ruff mypy python-multipart` → `ruff check .` → `mypy ... \|\| true` → `python export_openapi.py` ↔ `openapi-snapshot.json` drift check → `pytest tests/ -q` |
-| frontend | `npm ci` → `npm run lint -- --max-warnings 999` → `npm run test:ci` (vitest run) → `npm run build` (vite build) |
+| Job             | Steps                                                                  |
+| --------------- | ---------------------------------------------------------------------- |
+| backend         | `pip install fastapi pydantic pytest httpx ruff mypy python-multipart` → `ruff check .` → `mypy ... \|\| true` → `python export_openapi.py` ↔ `openapi-snapshot.json` drift check → `pytest tests/ -q` |
+| frontend-lint   | `npm ci` → `npm run lint -- --max-warnings 999`                        |
+| frontend-test   | `npm ci` → `npm run test:ci` (vitest run)                              |
+| frontend-build  | `npm ci` → `npm run build` (vite build)                                |
+
+The three `frontend-*` jobs run in parallel — each pays its own
+`checkout` + `setup-node` + `npm ci`, but `cache: npm` keeps the install
+fast on warm runners. Wall-clock CI time is bounded by the slowest of
+the three (typically the build), not their sum.
 
 Python 3.11, Node 20.
 
