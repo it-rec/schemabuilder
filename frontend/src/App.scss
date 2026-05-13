@@ -219,16 +219,36 @@
 
 // Inline filename inside the auto-generate hint. Long uploads
 // ("scan-2024-11-09T15-32-45_invoice_v3_final-FINAL.pdf") otherwise
-// blow out the modal width.
+// blow out the modal width. `max-width: 100%` keeps it inside the
+// flex column on narrow viewports; the explicit 22rem cap stops it
+// from monopolising the line on desktop.
 .definition-editor__auto-generate-filename {
   display: inline-block;
-  max-width: 22rem;
+  max-width: min(22rem, 100%);
   vertical-align: bottom;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--cds-code-01-font-family, monospace);
   color: var(--cds-text-primary, #161616);
+}
+
+// On phone-sized viewports the icon + text row gets cramped. Drop the
+// icon to its own line so the title/hint can use the full width and
+// nothing overflows the modal padding.
+@media (max-width: 671px) {
+  .definition-editor__auto-generate-row {
+    flex-direction: column;
+    gap: spacing.$spacing-03;
+  }
+  .definition-editor__auto-generate-icon {
+    margin-top: 0;
+  }
+  .definition-editor__auto-generate-filename {
+    // The mobile modal can be much narrower than 22rem; let the cap
+    // collapse all the way down so ellipsis kicks in early.
+    max-width: 100%;
+  }
 }
 
 .definition-editor__fields-header {
@@ -594,13 +614,17 @@
 
 // Richer empty-state card that doubles as the "what now?" panel when no
 // definition is selected yet. Sits below the title and offers the
-// auto-generate + create-blank CTAs.
+// auto-generate + create-blank CTAs. `min-width: 0` lets the card shrink
+// inside the grid track on tablet/mobile breakpoints where the parent
+// `.app-layout__panel` collapses to ~1fr — otherwise long button labels
+// would push the column past its allotted width.
 .fields-panel__empty-state {
   display: flex;
   flex-direction: column;
   gap: spacing.$spacing-04;
   padding: spacing.$spacing-05;
   margin-top: spacing.$spacing-04;
+  min-width: 0;
   background: var(--cds-layer-02, #ffffff);
   border: 1px solid var(--cds-border-subtle, #e0e0e0);
   border-left: 3px solid var(--cds-support-info, #0f62fe);
@@ -610,6 +634,11 @@
   @include type.type-style("heading-compact-01");
   color: var(--cds-text-primary, #161616);
   margin: 0;
+  // Headlines with two long words ("No matching definition") wrap by
+  // default; the `overflow-wrap` rule also breaks pathologically long
+  // single tokens (e.g. URL-y filenames pasted in) so they never push
+  // the card out of its column.
+  overflow-wrap: anywhere;
 }
 
 .fields-panel__empty-actions {
@@ -617,12 +646,23 @@
   flex-direction: column;
   gap: spacing.$spacing-02;
   align-items: stretch;
+  // Carbon's <Button size="sm"> ships with a 8rem min-width. On the
+  // 360px desktop panel that's fine; on a tablet column that shares
+  // 1fr with the viewer it can force a horizontal scroll. Cap the
+  // children to the available width so the buttons wrap their label
+  // instead of overflowing.
+  > * {
+    max-width: 100%;
+  }
 }
 
 .fields-panel__empty-hint {
   @include type.type-style("helper-text-01");
   color: var(--cds-text-secondary, #525252);
   margin: 0;
+  // Truncate long source filenames on a single line; the full name is
+  // still available via the `title` attribute set in the component.
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
