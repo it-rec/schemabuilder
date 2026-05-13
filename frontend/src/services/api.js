@@ -218,6 +218,22 @@ export async function extractFields(docId, definitionId, { signal } = {}) {
   return res.json();
 }
 
+// Ask the backend to draft a definition for the given document via the
+// LLM. Returns `{document_id, document: {document_type, document_description?, fields}}`
+// — the same envelope the definition editor consumes when cloning a
+// template, so the result can be dropped straight into the draft state.
+// Longer timeout than a normal GET because the LLM round-trip plus
+// (worst case) a cold Docling text extraction can take a while.
+export async function suggestDefinitionFromDocument(docId, { signal } = {}) {
+  const res = await request(`/api/documents/${docId}/suggest-definition`, {
+    method: "POST",
+    signal,
+    timeoutMs: 120_000,
+    errorFallback: "Failed to generate a schema suggestion",
+  });
+  return res.json();
+}
+
 export async function uploadDefinition(definition, { overwrite = false, signal } = {}) {
   const qs = overwrite ? "?overwrite=true" : "";
   const res = await request(`/api/definitions${qs}`, {

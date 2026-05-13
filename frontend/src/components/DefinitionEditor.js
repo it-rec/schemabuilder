@@ -22,6 +22,7 @@ import {
   fetchDefinitionCodegen,
   fetchTemplate,
   fetchTemplates,
+  suggestDefinitionFromDocument,
   updateDefinition,
   uploadDefinition,
 } from "../services/api";
@@ -610,6 +611,12 @@ export default function DefinitionEditor({
   open,
   mode, // "create" | "edit"
   definitionId, // required when mode === "edit"
+  // Optional: when set in create mode, the editor shows an
+  // "Auto-generate from current document" button that asks the backend
+  // to draft a schema from this document's text via the LLM. The user
+  // still reviews + saves the result through the normal flow.
+  suggestForDocId,
+  suggestForDocLabel,
   onClose,
   onSaved, // (savedDef) => void — parent refreshes its list / selection
   onDeleted, // (deletedId) => void
@@ -631,6 +638,11 @@ export default function DefinitionEditor({
   // working on a concrete definition).
   const [templates, setTemplates] = useState([]);
   const [templateLoading, setTemplateLoading] = useState(false);
+  // Track whether an auto-generate request is in flight so the button
+  // can show a loading label and stay disabled. Separate from
+  // `templateLoading` because both can happen against the same draft and
+  // we want each control to spin independently.
+  const [suggestLoading, setSuggestLoading] = useState(false);
 
   // Hydrate the draft when the modal opens. Reset on close so reopening
   // doesn't show stale state from a previous edit.
@@ -684,6 +696,30 @@ export default function DefinitionEditor({
       });
     return () => ctrl.abort();
   }, [open, mode]);
+
+  const handleAutoGenerate = useCallback(async () => {
+    if (!suggestForDocId) return;
+    setSuggestLoading(true);
+    setError(null);
+    try {
+      const result = await suggestDefinitionFromDocument(suggestForDocId);
+      const doc = result?.document || {};
+      setDraft({
+        documentType: doc.document_type ?? "",
+        description: doc.document_description ?? "",
+        fields: Array.isArray(doc.fields) ? doc.fields.map(hydrateField) : [],
+      });
+      // Don't stash the suggestion as `original` — `buildPayload` only
+      // merges top-level extras from `original`, and the suggestion has
+      // none. Leaving it null also matches the "fresh definition" intent
+      // so the POST is a clean create rather than an upsert.
+      setOriginal(null);
+    } catch (err) {
+      setError(err.message || "Failed to generate a schema suggestion.");
+    } finally {
+      setSuggestLoading(false);
+    }
+  }, [suggestForDocId]);
 
   const handleApplyTemplate = useCallback(async (templateId) => {
     if (!templateId) return;
@@ -823,6 +859,27 @@ export default function DefinitionEditor({
         )}
         {!loadError && !loading && (
           <div className="definition-editor__body">
+            {mode === "create" && suggestForDocId && (
+              <div className="definition-editor__auto-generate">
+                <Button
+                  kind="tertiary"
+                  size="sm"
+                  onClick={handleAutoGenerate}
+                  disabled={suggestLoading}
+                  data-testid="def-auto-generate-button"
+                >
+                  {suggestLoading
+                    ? "Generating schema…"
+                    : suggestForDocLabel
+                      ? `Auto-generate from “${suggestForDocLabel}”`
+                      : "Auto-generate from selected document"}
+                </Button>
+                <p className="definition-editor__auto-generate-hint">
+                  Drafts a starting schema by reading the selected document.
+                  Replaces the current draft. You can edit anything before saving.
+                </p>
+              </div>
+            )}
             {mode === "create" && templates.length > 0 && (
               <Dropdown
                 id="def-template-picker"

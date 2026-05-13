@@ -574,6 +574,12 @@ export default function App() {
           open
           mode={editorMode}
           definitionId={editorMode === "edit" ? selectedDefId : null}
+          suggestForDocId={editorMode === "create" ? selectedDocId : null}
+          suggestForDocLabel={
+            editorMode === "create"
+              ? documents.find((d) => d.id === selectedDocId)?.filename
+              : null
+          }
           onClose={() => setEditorMode(null)}
           onSaved={handleEditorSaved}
           onDeleted={handleEditorDeleted}

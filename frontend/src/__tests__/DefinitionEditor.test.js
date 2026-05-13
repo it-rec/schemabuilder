@@ -22,6 +22,7 @@ beforeEach(() => {
   api.fetchTemplates.mockResolvedValue([]);
   api.fetchTemplate.mockReset();
   api.fetchDefinitionCodegen.mockReset();
+  api.suggestDefinitionFromDocument.mockReset();
 });
 
 afterEach(() => {
@@ -322,6 +323,85 @@ test("create flow: template picker hydrates draft from the chosen template", asy
   // Document type field is now hydrated from the template.
   expect(await screen.findByDisplayValue("Invoice")).toBeInTheDocument();
   expect(screen.getByDisplayValue("invoice_number")).toBeInTheDocument();
+});
+
+test("create flow: auto-generate button hydrates draft from the LLM suggestion", async () => {
+  const user = userEvent.setup();
+  api.suggestDefinitionFromDocument.mockResolvedValue({
+    document_id: "fake_pdf",
+    document: {
+      document_type: "Lab Report",
+      document_description: "Clinical lab results.",
+      fields: [
+        { name: "patient_id", description: "ID" },
+        { name: "report_date" },
+      ],
+    },
+  });
+
+  render(
+    <DefinitionEditor
+      open
+      mode="create"
+      suggestForDocId="fake_pdf"
+      suggestForDocLabel="fake.pdf"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  const button = await screen.findByTestId("def-auto-generate-button");
+  expect(button).toHaveTextContent(/Auto-generate from/);
+  await user.click(button);
+
+  await waitFor(() =>
+    expect(api.suggestDefinitionFromDocument).toHaveBeenCalledWith("fake_pdf"),
+  );
+  // Document type, description, and field names land in the draft state.
+  expect(await screen.findByDisplayValue("Lab Report")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("Clinical lab results.")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("patient_id")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("report_date")).toBeInTheDocument();
+});
+
+test("create flow: auto-generate button is hidden when no document is selected", async () => {
+  render(
+    <DefinitionEditor
+      open
+      mode="create"
+      // suggestForDocId omitted on purpose — the button must NOT render so
+      // a user without a selected document doesn't see a dead control.
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+  await screen.findByLabelText(/Document type/i);
+  expect(screen.queryByTestId("def-auto-generate-button")).toBeNull();
+});
+
+test("create flow: auto-generate surfaces backend errors instead of crashing", async () => {
+  const user = userEvent.setup();
+  api.suggestDefinitionFromDocument.mockRejectedValue(
+    new Error("Schema suggestion is not configured."),
+  );
+
+  render(
+    <DefinitionEditor
+      open
+      mode="create"
+      suggestForDocId="fake_pdf"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  await user.click(await screen.findByTestId("def-auto-generate-button"));
+  expect(
+    await screen.findByText(/Schema suggestion is not configured/),
+  ).toBeInTheDocument();
 });
 
 test("edit flow: round-trips normalizer keyword on save", async () => {
