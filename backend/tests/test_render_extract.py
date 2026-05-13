@@ -1255,6 +1255,11 @@ def _install_fake_win32(monkeypatch, app_call_log: list):
                 return _PptApp()
             raise ValueError(name)
 
+    # main.py prefers gencache.EnsureDispatch (early binding) and falls back
+    # to Dispatch. The fake routes EnsureDispatch to the same Dispatch impl
+    # so a single ("dispatch", name) entry is logged per call either way.
+    _Client.gencache = types.SimpleNamespace(EnsureDispatch=_Client.Dispatch)
+
     fake_win32com = types.SimpleNamespace(client=_Client)
     fake_pythoncom = types.SimpleNamespace(
         CoInitialize=lambda: app_call_log.append(("co-init",)),
