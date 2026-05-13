@@ -1245,20 +1245,31 @@ def _install_fake_win32(monkeypatch, app_call_log: list):
         def Quit(self):
             app_call_log.append(("quit-ppt",))
 
+    def _make_app(name):
+        if name == "Word.Application":
+            return _WordApp()
+        if name == "PowerPoint.Application":
+            return _PptApp()
+        raise ValueError(name)
+
     class _Client:
         @staticmethod
         def Dispatch(name):
             app_call_log.append(("dispatch", name))
-            if name == "Word.Application":
-                return _WordApp()
-            if name == "PowerPoint.Application":
-                return _PptApp()
-            raise ValueError(name)
+            return _make_app(name)
 
-    # main.py prefers gencache.EnsureDispatch (early binding) and falls back
-    # to Dispatch. The fake routes EnsureDispatch to the same Dispatch impl
-    # so a single ("dispatch", name) entry is logged per call either way.
-    _Client.gencache = types.SimpleNamespace(EnsureDispatch=_Client.Dispatch)
+        @staticmethod
+        def _EnsureDispatch(name):
+            app_call_log.append(("ensure-dispatch", name))
+            return _make_app(name)
+
+    # Word uses early binding (gencache.EnsureDispatch) — required so
+    # Documents.Open returns a typelib-backed proxy that resolves SaveAs.
+    # PowerPoint uses plain Dispatch — early binding routes
+    # ExportAsFixedFormat through _ApplyTypes_ with a strict 16-arg signature
+    # whose unfilled VT_DISPATCH slot can't be marshaled. We log the two
+    # paths under distinct kinds so tests can assert which one was used.
+    _Client.gencache = types.SimpleNamespace(EnsureDispatch=_Client._EnsureDispatch)
 
     fake_win32com = types.SimpleNamespace(client=_Client)
     fake_pythoncom = types.SimpleNamespace(
@@ -1284,7 +1295,10 @@ def test_convert_to_pdf_docx_uses_word(monkeypatch, tmp_path):
     kinds = [t[0] for t in log]
     assert kinds[0] == "co-init"
     assert kinds[-1] == "co-uninit"
-    assert "dispatch" in kinds
+    # Word must go through gencache.EnsureDispatch so SaveAs resolves on the
+    # Documents.Open proxy. A bare ("dispatch", ...) would mean late binding.
+    assert ("ensure-dispatch", "Word.Application") in log
+    assert ("dispatch", "Word.Application") not in log
     assert "save" in kinds
     assert ("quit-word",) in log
 
@@ -1300,6 +1314,11 @@ def test_convert_to_pdf_pptx_uses_powerpoint(monkeypatch, tmp_path):
     assert pdf is not None
     assert pdf.exists()
     assert ("quit-ppt",) in log
+    # PowerPoint must use plain Dispatch — gencache routes ExportAsFixedFormat
+    # through _ApplyTypes_ with the full 16-arg typelib signature, where the
+    # unfilled VT_DISPATCH PrintRange slot fails to marshal.
+    assert ("dispatch", "PowerPoint.Application") in log
+    assert ("ensure-dispatch", "PowerPoint.Application") not in log
 
 
 def test_convert_to_pdf_pptx_uses_export_with_screen_intent(monkeypatch, tmp_path):
@@ -1362,7 +1381,7 @@ def test_convert_to_pdf_caches_result(monkeypatch, tmp_path):
     second = main._convert_to_pdf(src)
     assert first == second
     # Only one Word dispatch — second call hit the cache.
-    dispatches = [t for t in log if t[0] == "dispatch"]
+    dispatches = [t for t in log if t[0] in ("dispatch", "ensure-dispatch")]
     assert len(dispatches) == 1
 
 
@@ -1377,7 +1396,7 @@ def test_convert_to_pdf_invalidates_cache_when_source_changes(monkeypatch, tmp_p
     time.sleep(0.01)
     src.write_bytes(b"v2 longer content here")
     main._convert_to_pdf(src)
-    dispatches = [t for t in log if t[0] == "dispatch"]
+    dispatches = [t for t in log if t[0] in ("dispatch", "ensure-dispatch")]
     assert len(dispatches) == 2  # source changed → re-convert
 
 

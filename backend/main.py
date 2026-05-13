@@ -525,14 +525,15 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
     import pythoncom
     import win32com.client
 
-    def _dispatch_office(progid: str):
-        # Prefer early binding via gencache.EnsureDispatch: it runs makepy to
-        # generate strongly-typed proxies from the typelib. Late-bound
-        # Dispatch falls back to dynamic.py, where the IDispatch proxy
-        # returned by Documents.Open does not always resolve member names
-        # (e.g. SaveAs) via GetIDsOfNames — raising
-        # "AttributeError: Open.SaveAs". Fall back to plain Dispatch only if
-        # gencache is unavailable (e.g. read-only cache dir).
+    # Word needs early binding (gencache.EnsureDispatch): late-bound Dispatch
+    # returns a dynamic IDispatch proxy from Documents.Open that does not
+    # resolve SaveAs via GetIDsOfNames, raising "AttributeError: Open.SaveAs".
+    # PowerPoint is the opposite: gencache-generated _Presentation.py routes
+    # ExportAsFixedFormat through _ApplyTypes_ with the full 16-arg typelib
+    # signature, and the unfilled VT_DISPATCH slot (PrintRange) trips
+    # "TypeError: The Python instance can not be converted to a COM object".
+    # So we use gencache for Word only and plain Dispatch for PowerPoint.
+    def _ensure_dispatch_office(progid: str):
         try:
             return win32com.client.gencache.EnsureDispatch(progid)
         except Exception:
@@ -550,7 +551,7 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
     pythoncom.CoInitialize()
     try:
         if ext == ".docx":
-            word = _dispatch_office("Word.Application")
+            word = _ensure_dispatch_office("Word.Application")
             word.Visible = False
             try:
                 doc = word.Documents.Open(abs_path)
@@ -559,7 +560,7 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
             finally:
                 word.Quit()
         elif ext == ".pptx":
-            ppt = _dispatch_office("PowerPoint.Application")
+            ppt = win32com.client.Dispatch("PowerPoint.Application")
             try:
                 presentation = ppt.Presentations.Open(abs_path, WithWindow=False)
                 # ExportAsFixedFormat (not SaveAs FileFormat=ppSaveAsPDF) is
