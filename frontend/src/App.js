@@ -58,6 +58,11 @@ export default function App() {
   // "edit". Tracking the mode separately from `open` keeps the modal's body
   // logic (hydrate-on-open) simple and lets the dialog tear down cleanly.
   const [editorMode, setEditorMode] = useState(null);
+  // When the user enters create mode via the FieldsPanel empty-state CTA we
+  // want the editor to kick off the LLM suggestion immediately, not require a
+  // second click on the in-modal button. Flips back to false as soon as the
+  // editor reads it so a manual Cancel + reopen starts fresh.
+  const [editorAutoStartSuggest, setEditorAutoStartSuggest] = useState(false);
   // History modal — open when the user clicks "History" inside the editor.
   // Stored separately so it can sit on top of the editor (Carbon supports
   // stacked modals).
@@ -351,9 +356,27 @@ export default function App() {
         setSelectedDefId(saved.id);
       }
       setEditorMode(null);
+      setEditorAutoStartSuggest(false);
     },
     [refreshDefinitions],
   );
+
+  // Open the create-mode editor with the LLM suggestion pre-armed so the
+  // user goes straight from "this doesn't match anything" to "here's a draft
+  // schema, review it" without an interstitial click on the modal's button.
+  const handleAutoGenerateFromDoc = useCallback(() => {
+    if (!selectedDocId) return;
+    setEditorAutoStartSuggest(true);
+    setEditorMode("create");
+  }, [selectedDocId]);
+
+  // Open a blank New-definition modal. Same end state as clicking the "New"
+  // button in the sidebar, exposed via the empty-state CTA in FieldsPanel so
+  // users don't have to scan the UI for the button.
+  const handleCreateBlankDefinition = useCallback(() => {
+    setEditorAutoStartSuggest(false);
+    setEditorMode("create");
+  }, []);
 
   // Trigger a browser download for an exported table or the full JSON. We
   // resolve to a Blob (or a stringified JSON object) and synthesize an
@@ -565,6 +588,13 @@ export default function App() {
               onExport={handleExport}
               highlightedField={highlightedField}
               loading={loading || extracting}
+              hasDocument={!!selectedDocId}
+              hasDefinitions={definitions.length > 0}
+              onAutoGenerate={selectedDocId ? handleAutoGenerateFromDoc : null}
+              onCreateBlank={handleCreateBlankDefinition}
+              selectedDocLabel={
+                documents.find((d) => d.id === selectedDocId)?.filename
+              }
             />
           </aside>
         </div>
@@ -580,7 +610,11 @@ export default function App() {
               ? documents.find((d) => d.id === selectedDocId)?.filename
               : null
           }
-          onClose={() => setEditorMode(null)}
+          autoStartSuggest={editorMode === "create" && editorAutoStartSuggest}
+          onClose={() => {
+            setEditorMode(null);
+            setEditorAutoStartSuggest(false);
+          }}
           onSaved={handleEditorSaved}
           onDeleted={handleEditorDeleted}
           onShowHistory={() => setHistoryOpen(true)}

@@ -381,6 +381,83 @@ test("create flow: auto-generate button is hidden when no document is selected",
   expect(screen.queryByTestId("def-auto-generate-button")).toBeNull();
 });
 
+test("create flow: auto-start kicks off generation as soon as the modal opens", async () => {
+  // Hold the promise open so the loading indicator is observable before
+  // the success state replaces it.
+  let resolveSuggest;
+  api.suggestDefinitionFromDocument.mockReturnValue(
+    new Promise((r) => {
+      resolveSuggest = r;
+    }),
+  );
+
+  render(
+    <DefinitionEditor
+      open
+      mode="create"
+      suggestForDocId="fake_pdf"
+      suggestForDocLabel="fake.pdf"
+      autoStartSuggest
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  // Loading indicator shows up without the user clicking anything.
+  expect(
+    await screen.findByTestId("def-auto-generate-loading"),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(api.suggestDefinitionFromDocument).toHaveBeenCalledWith("fake_pdf"),
+  );
+  resolveSuggest({
+    document_id: "fake_pdf",
+    document: {
+      document_type: "Invoice",
+      fields: [{ name: "invoice_id" }],
+    },
+  });
+  // After generation, the success notification appears and the draft is
+  // hydrated.
+  expect(
+    await screen.findByTestId("def-auto-generate-success"),
+  ).toBeInTheDocument();
+  expect(await screen.findByDisplayValue("Invoice")).toBeInTheDocument();
+});
+
+test("create flow: regeneration over a dirty draft asks for confirmation", async () => {
+  const user = userEvent.setup();
+  api.suggestDefinitionFromDocument.mockResolvedValue({
+    document_id: "fake_pdf",
+    document: { document_type: "Invoice", fields: [{ name: "x" }] },
+  });
+  // Default confirm() is stubbed true in beforeEach; flip it to false so
+  // we can assert the wrapper blocks the API call.
+  vi.spyOn(window, "confirm").mockImplementation(() => false);
+
+  render(
+    <DefinitionEditor
+      open
+      mode="create"
+      suggestForDocId="fake_pdf"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  // Make the draft dirty.
+  await user.type(await screen.findByLabelText(/Document type/i), "WIP");
+
+  // Now click auto-generate — the confirm() returns false, so we never
+  // hit the network and the draft stays.
+  await user.click(screen.getByTestId("def-auto-generate-button"));
+  expect(window.confirm).toHaveBeenCalled();
+  expect(api.suggestDefinitionFromDocument).not.toHaveBeenCalled();
+  expect(screen.getByDisplayValue("WIP")).toBeInTheDocument();
+});
+
 test("create flow: auto-generate surfaces backend errors instead of crashing", async () => {
   const user = userEvent.setup();
   api.suggestDefinitionFromDocument.mockRejectedValue(

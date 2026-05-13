@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useCallback } from "react";
 import {
+  Button,
   OverflowMenu,
   OverflowMenuItem,
   Tag,
@@ -12,6 +13,7 @@ import {
   ChevronDown,
   ChevronRight,
   Information,
+  MagicWand,
 } from "@carbon/react/icons";
 
 const ConfidenceIndicator = React.memo(function ConfidenceIndicator({ confidence }) {
@@ -370,6 +372,16 @@ export default function FieldsPanel({
   onExport,
   highlightedField,
   loading,
+  // Empty-state guidance. When no extraction is available the panel
+  // doubles as the "what now?" surface for the user — showing why
+  // nothing is here and which next steps are sensible. All three are
+  // optional so existing call sites that only pass `extraction` keep
+  // rendering the original, terser empty message.
+  hasDocument = false,
+  hasDefinitions = false,
+  onAutoGenerate, // () => void — triggers LLM schema suggestion + create flow
+  onCreateBlank, // () => void — opens an empty New-definition modal
+  selectedDocLabel,
 }) {
   const allFields = extraction?.fields;
   // Hide fields suppressed by `visible_if`. The backend wipes their
@@ -414,12 +426,66 @@ export default function FieldsPanel({
   }
 
   if (!extraction) {
+    // Three distinct empty states, ordered by how much action the
+    // panel can offer the user:
+    //   1. No document at all → just explain the next step.
+    //   2. Has document, no definitions → push hard towards
+    //      auto-generate; that's the fastest path to a useful screen.
+    //   3. Has document + has definitions, none selected → softer hint
+    //      that they should pick one OR auto-generate.
+    const showAutoGen = hasDocument && typeof onAutoGenerate === "function";
+    const showCreateBlank =
+      hasDocument && typeof onCreateBlank === "function";
+    const headline = !hasDocument
+      ? "Select a document"
+      : !hasDefinitions
+        ? "No definitions yet"
+        : "No matching definition";
+    const message = !hasDocument
+      ? "Pick a document from the list to view its fields."
+      : !hasDefinitions
+        ? "Definitions describe which fields to pull out of a document. Let the model propose one from this file, or start from scratch."
+        : "Pick a definition from the dropdown above, or auto-generate one from this document.";
     return (
       <div className="fields-panel">
-        <h2 className="fields-panel__title">Document Fields</h2>
-        <p className="fields-panel__empty">
-          Select a document definition to extract fields.
-        </p>
+        <h2 className="fields-panel__title">Document fields</h2>
+        <div className="fields-panel__empty-state">
+          <p className="fields-panel__empty-headline">{headline}</p>
+          <p className="fields-panel__empty">{message}</p>
+          {(showAutoGen || showCreateBlank) && (
+            <div className="fields-panel__empty-actions">
+              {showAutoGen && (
+                <Button
+                  kind="primary"
+                  size="sm"
+                  renderIcon={MagicWand}
+                  onClick={onAutoGenerate}
+                  data-testid="fields-panel-auto-generate"
+                >
+                  Auto-generate from document
+                </Button>
+              )}
+              {showCreateBlank && (
+                <Button
+                  kind="ghost"
+                  size="sm"
+                  onClick={onCreateBlank}
+                  data-testid="fields-panel-create-blank"
+                >
+                  Create blank definition
+                </Button>
+              )}
+            </div>
+          )}
+          {showAutoGen && selectedDocLabel && (
+            <p
+              className="fields-panel__empty-hint"
+              title={selectedDocLabel}
+            >
+              Source: {selectedDocLabel}
+            </p>
+          )}
+        </div>
       </div>
     );
   }

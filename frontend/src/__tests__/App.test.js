@@ -163,6 +163,43 @@ test("overlay clears and data loads automatically once the backend is back", asy
   await waitFor(() => expect(api.fetchDocuments).toHaveBeenCalled());
 });
 
+test("FieldsPanel empty-state CTA opens the editor with auto-generation in flight", async () => {
+  // No definitions at all → FieldsPanel shows the "no matching
+  // definition" CTAs and clicking Auto-generate must take the user
+  // straight from "nothing here" to "model is working on a draft".
+  api.fetchDefinitions.mockResolvedValue([]);
+  let resolveSuggest;
+  api.suggestDefinitionFromDocument.mockReturnValue(
+    new Promise((r) => {
+      resolveSuggest = r;
+    }),
+  );
+  // Make sure the mocked module exposes fetchTemplates so the
+  // editor's create-mode effect doesn't blow up.
+  api.fetchTemplates.mockResolvedValue([]);
+
+  render(<App />);
+  // FieldsPanel renders its CTA after the first doc has loaded and
+  // fetchDefinitions has resolved (with an empty list).
+  const autoGen = await screen.findByTestId("fields-panel-auto-generate");
+  fireEvent.click(autoGen);
+
+  // The editor mounts and the inline loading state appears without a
+  // second click — autoStartSuggest fired the request immediately.
+  expect(
+    await screen.findByTestId("def-auto-generate-loading"),
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(api.suggestDefinitionFromDocument).toHaveBeenCalledWith("abc123"),
+  );
+  resolveSuggest({
+    document_id: "abc123",
+    document: { document_type: "Invoice", fields: [{ name: "x" }] },
+  });
+  // Draft hydrates with the suggestion.
+  expect(await screen.findByDisplayValue("Invoice")).toBeInTheDocument();
+});
+
 test("export menu triggers JSON download via api.exportTablesJson", async () => {
   api.extractFields.mockResolvedValue({
     ...mockExtraction,

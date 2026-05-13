@@ -180,16 +180,55 @@
 .definition-editor__auto-generate {
   display: flex;
   flex-direction: column;
-  gap: spacing.$spacing-02;
-  padding: spacing.$spacing-04;
-  background: var(--cds-layer-01, #f4f4f4);
+  gap: spacing.$spacing-04;
+  padding: spacing.$spacing-05;
+  background: var(--cds-layer-accent-01, #e0e0e0);
   border-left: 3px solid var(--cds-support-info, #0f62fe);
+}
+
+.definition-editor__auto-generate-row {
+  display: flex;
+  align-items: flex-start;
+  gap: spacing.$spacing-04;
+}
+
+.definition-editor__auto-generate-icon {
+  flex-shrink: 0;
+  color: var(--cds-support-info, #0f62fe);
+  margin-top: 2px;
+}
+
+.definition-editor__auto-generate-text {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-02;
+  min-width: 0; // allow ellipsis on inner filename span
+}
+
+.definition-editor__auto-generate-title {
+  @include type.type-style("heading-compact-01");
+  color: var(--cds-text-primary, #161616);
+  margin: 0;
 }
 
 .definition-editor__auto-generate-hint {
   @include type.type-style("body-compact-01");
   color: var(--cds-text-secondary, #525252);
   margin: 0;
+}
+
+// Inline filename inside the auto-generate hint. Long uploads
+// ("scan-2024-11-09T15-32-45_invoice_v3_final-FINAL.pdf") otherwise
+// blow out the modal width.
+.definition-editor__auto-generate-filename {
+  display: inline-block;
+  max-width: 22rem;
+  vertical-align: bottom;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--cds-code-01-font-family, monospace);
+  color: var(--cds-text-primary, #161616);
 }
 
 .definition-editor__fields-header {
@@ -550,6 +589,43 @@
 .fields-panel__empty {
   @include type.type-style("body-compact-01");
   color: var(--cds-text-secondary, #525252);
+  margin: 0;
+}
+
+// Richer empty-state card that doubles as the "what now?" panel when no
+// definition is selected yet. Sits below the title and offers the
+// auto-generate + create-blank CTAs.
+.fields-panel__empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-04;
+  padding: spacing.$spacing-05;
+  margin-top: spacing.$spacing-04;
+  background: var(--cds-layer-02, #ffffff);
+  border: 1px solid var(--cds-border-subtle, #e0e0e0);
+  border-left: 3px solid var(--cds-support-info, #0f62fe);
+}
+
+.fields-panel__empty-headline {
+  @include type.type-style("heading-compact-01");
+  color: var(--cds-text-primary, #161616);
+  margin: 0;
+}
+
+.fields-panel__empty-actions {
+  display: flex;
+  flex-direction: column;
+  gap: spacing.$spacing-02;
+  align-items: stretch;
+}
+
+.fields-panel__empty-hint {
+  @include type.type-style("helper-text-01");
+  color: var(--cds-text-secondary, #525252);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fields-panel__list {

@@ -5,6 +5,7 @@ import {
   ComposedModal,
   DismissibleTag,
   Dropdown,
+  InlineLoading,
   InlineNotification,
   ModalBody,
   ModalFooter,
@@ -15,7 +16,7 @@ import {
   TextArea,
   TextInput,
 } from "@carbon/react";
-import { Add, TrashCan } from "@carbon/react/icons";
+import { Add, MagicWand, TrashCan } from "@carbon/react/icons";
 import {
   deleteDefinition,
   fetchDefinition,
@@ -617,6 +618,12 @@ export default function DefinitionEditor({
   // still reviews + saves the result through the normal flow.
   suggestForDocId,
   suggestForDocLabel,
+  // When true, kick off the LLM suggestion the moment the modal opens so
+  // a user who clicked "Auto-generate from document" elsewhere doesn't
+  // have to click a second button inside the modal. Read once on first
+  // render and then ignored — the parent flips it back to false via
+  // onClose.
+  autoStartSuggest = false,
   onClose,
   onSaved, // (savedDef) => void — parent refreshes its list / selection
   onDeleted, // (deletedId) => void
@@ -643,6 +650,10 @@ export default function DefinitionEditor({
   // `templateLoading` because both can happen against the same draft and
   // we want each control to spin independently.
   const [suggestLoading, setSuggestLoading] = useState(false);
+  // Non-error post-suggestion banner — e.g. "Generated 7 fields. Review
+  // and click Create." Cleared on subsequent draft edits so it doesn't
+  // linger past the moment it was useful.
+  const [suggestSuccess, setSuggestSuccess] = useState(null);
 
   // Hydrate the draft when the modal opens. Reset on close so reopening
   // doesn't show stale state from a previous edit.
@@ -697,29 +708,93 @@ export default function DefinitionEditor({
     return () => ctrl.abort();
   }, [open, mode]);
 
-  const handleAutoGenerate = useCallback(async () => {
+  const runAutoGenerate = useCallback(async () => {
     if (!suggestForDocId) return;
     setSuggestLoading(true);
     setError(null);
+    setSuggestSuccess(null);
     try {
       const result = await suggestDefinitionFromDocument(suggestForDocId);
       const doc = result?.document || {};
+      const fields = Array.isArray(doc.fields) ? doc.fields.map(hydrateField) : [];
       setDraft({
         documentType: doc.document_type ?? "",
         description: doc.document_description ?? "",
-        fields: Array.isArray(doc.fields) ? doc.fields.map(hydrateField) : [],
+        fields,
       });
       // Don't stash the suggestion as `original` — `buildPayload` only
       // merges top-level extras from `original`, and the suggestion has
       // none. Leaving it null also matches the "fresh definition" intent
       // so the POST is a clean create rather than an upsert.
       setOriginal(null);
+      const count = fields.length;
+      setSuggestSuccess(
+        `Generated ${count} field${count === 1 ? "" : "s"}. Review the draft below, edit anything you don't need, then click Create.`,
+      );
     } catch (err) {
       setError(err.message || "Failed to generate a schema suggestion.");
     } finally {
       setSuggestLoading(false);
     }
   }, [suggestForDocId]);
+
+  // Wrapper that adds a "are you sure?" prompt if the user has typed
+  // anything into the draft. Auto-generate replaces the entire draft,
+  // and silently nuking 5 minutes of typing would be a betrayal-grade UX
+  // regression. The internal create flow (autoStartSuggest=true) skips
+  // the prompt because by definition the draft is empty.
+  const handleAutoGenerate = useCallback(
+    async ({ skipConfirm = false } = {}) => {
+      const hasDraftContent =
+        draft.documentType.trim() !== "" ||
+        draft.description.trim() !== "" ||
+        draft.fields.length > 0;
+      if (
+        hasDraftContent &&
+        !skipConfirm &&
+        // eslint-disable-next-line no-alert
+        !window.confirm(
+          "Replace your current draft with the auto-generated schema?",
+        )
+      ) {
+        return;
+      }
+      await runAutoGenerate();
+    },
+    [draft, runAutoGenerate],
+  );
+
+  // Auto-start on open: when the parent passes `autoStartSuggest=true`
+  // (entry via the FieldsPanel CTA), kick off generation as soon as the
+  // modal mounts. Latched on the parent prop so a re-render after the
+  // generation completes doesn't refire it. The latch is local to this
+  // effect run; reopening the modal with the prop true again refires
+  // exactly once, which is what we want.
+  const [autoStartConsumed, setAutoStartConsumed] = useState(false);
+  useEffect(() => {
+    if (!open) {
+      setAutoStartConsumed(false);
+      return;
+    }
+    if (
+      mode === "create" &&
+      autoStartSuggest &&
+      suggestForDocId &&
+      !autoStartConsumed &&
+      !suggestLoading
+    ) {
+      setAutoStartConsumed(true);
+      runAutoGenerate();
+    }
+  }, [
+    open,
+    mode,
+    autoStartSuggest,
+    suggestForDocId,
+    autoStartConsumed,
+    suggestLoading,
+    runAutoGenerate,
+  ]);
 
   const handleApplyTemplate = useCallback(async (templateId) => {
     if (!templateId) return;
@@ -861,24 +936,67 @@ export default function DefinitionEditor({
           <div className="definition-editor__body">
             {mode === "create" && suggestForDocId && (
               <div className="definition-editor__auto-generate">
-                <Button
-                  kind="tertiary"
-                  size="sm"
-                  onClick={handleAutoGenerate}
-                  disabled={suggestLoading}
-                  data-testid="def-auto-generate-button"
-                >
-                  {suggestLoading
-                    ? "Generating schema…"
-                    : suggestForDocLabel
-                      ? `Auto-generate from “${suggestForDocLabel}”`
-                      : "Auto-generate from selected document"}
-                </Button>
-                <p className="definition-editor__auto-generate-hint">
-                  Drafts a starting schema by reading the selected document.
-                  Replaces the current draft. You can edit anything before saving.
-                </p>
+                <div className="definition-editor__auto-generate-row">
+                  <MagicWand
+                    size={20}
+                    aria-hidden="true"
+                    className="definition-editor__auto-generate-icon"
+                  />
+                  <div className="definition-editor__auto-generate-text">
+                    <p className="definition-editor__auto-generate-title">
+                      Let the model draft this schema
+                    </p>
+                    <p className="definition-editor__auto-generate-hint">
+                      {suggestForDocLabel ? (
+                        <>
+                          Reads{" "}
+                          <span
+                            className="definition-editor__auto-generate-filename"
+                            title={suggestForDocLabel}
+                          >
+                            {suggestForDocLabel}
+                          </span>{" "}
+                          and proposes the fields a definition for this kind of
+                          document should pull out. Replaces the current draft;
+                          you can still edit anything before saving.
+                        </>
+                      ) : (
+                        "Reads the selected document and proposes a starting set of fields. Replaces the current draft; you can still edit anything before saving."
+                      )}
+                    </p>
+                  </div>
+                </div>
+                {suggestLoading ? (
+                  <InlineLoading
+                    description="Reading the document and asking the model… this can take 10–30 seconds."
+                    status="active"
+                    data-testid="def-auto-generate-loading"
+                  />
+                ) : (
+                  <Button
+                    kind="tertiary"
+                    size="sm"
+                    renderIcon={MagicWand}
+                    onClick={() => handleAutoGenerate()}
+                    disabled={suggestLoading}
+                    data-testid="def-auto-generate-button"
+                  >
+                    {suggestSuccess
+                      ? "Regenerate from document"
+                      : "Auto-generate from document"}
+                  </Button>
+                )}
               </div>
+            )}
+            {suggestSuccess && !suggestLoading && (
+              <InlineNotification
+                kind="success"
+                title="Schema drafted"
+                subtitle={suggestSuccess}
+                onCloseButtonClick={() => setSuggestSuccess(null)}
+                lowContrast
+                data-testid="def-auto-generate-success"
+              />
             )}
             {mode === "create" && templates.length > 0 && (
               <Dropdown
