@@ -195,6 +195,131 @@ def test_upload_with_tiny_chunk_size_still_persists_full_body(client, monkeypatc
     assert on_disk.read_bytes() == body
 
 
+def test_upload_short_write_loop_resumes_on_partial_write(client, monkeypatch):
+    """os.write is permitted to return fewer bytes than requested; the inner
+    loop in upload_document must advance the memoryview by the actual count
+    and keep going. Force a short write on every call and verify the full
+    body still lands on disk."""
+    real_write = main.os.write
+    short_calls = {"n": 0}
+
+    def short_write(fd, data):
+        short_calls["n"] += 1
+        # Always write at most 3 bytes — forces the inner loop to iterate
+        # many times per read-chunk.
+        if isinstance(data, memoryview):
+            slice_bytes = bytes(data[:3])
+        else:
+            slice_bytes = data[:3]
+        return real_write(fd, slice_bytes)
+
+    monkeypatch.setattr(main.os, "write", short_write)
+    body = _PDF_BYTES + b"-payload-that-needs-many-partial-writes"
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("short.pdf", BytesIO(body), "application/pdf")},
+    )
+    assert resp.status_code == 200, resp.text
+    on_disk = main.TEST_DOCS_DIR / "short.pdf"
+    assert on_disk.read_bytes() == body
+    # Sanity: the short-write helper was exercised more than once per chunk.
+    assert short_calls["n"] > 1
+
+
+def test_upload_end_to_end_fuses_pdfium_open_via_prefetch(client, monkeypatch):
+    """After a real POST, the cold prefetch must open pypdfium2 exactly ONCE
+    (metadata + page 1 + page 2 in a single open) — the user-visible payoff
+    of commits e0ef47e/198e4ee/1e40325. Mocks the executor to synchronous
+    so the prefetch completes inside the request."""
+    import sys
+    import types
+
+    main._prefetch_inflight.clear()
+    main._render_cache.clear()
+    main._text_cache.clear()
+
+    opens = {"n": 0}
+
+    class _Bitmap:
+        def __init__(self, data):
+            self._data = data
+
+        def to_pil(self):
+            class _PIL:
+                def __init__(self, d):
+                    self._d = d
+
+                def save(self, buf, format=None, **_kw):
+                    buf.write(self._d)
+
+            return _PIL(self._data)
+
+    class _Page:
+        def __init__(self, bm):
+            self._bm = bm
+
+        def get_width(self):
+            return 100.0
+
+        def get_height(self):
+            return 100.0
+
+        def render(self, scale=2.0):
+            return _Bitmap(self._bm)
+
+    class _Doc:
+        def __init__(self):
+            self.pages = [_Page(b"P1"), _Page(b"P2")]
+            self.closed = False
+
+        def __len__(self):
+            return len(self.pages)
+
+        def __getitem__(self, i):
+            return self.pages[i]
+
+        def close(self):
+            self.closed = True
+
+    def fake_pdf_document(_path):
+        opens["n"] += 1
+        return _Doc()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pypdfium2",
+        types.SimpleNamespace(PdfDocument=fake_pdf_document),
+    )
+
+    class _Sync:
+        def submit(self, fn, *a, **kw):
+            fn(*a, **kw)
+            return None
+
+    monkeypatch.setattr(main, "_bg_executor", _Sync())
+    # Docling is not installed in CI; short-circuit text extraction.
+    monkeypatch.setattr(main, "_get_or_extract_text", lambda fp: {})
+
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("fused.pdf", BytesIO(_PDF_BYTES), "application/pdf")},
+    )
+    assert resp.status_code == 200
+    # ONE pdfium open covers metadata + page-1 + page-2 prefetch.
+    assert opens["n"] == 1, (
+        "fused prefetch regressed — expected a single pdfium open, got "
+        f"{opens['n']}"
+    )
+    doc_id = resp.json()["id"]
+    entry = main._render_cache.get(doc_id)
+    assert entry is not None
+    # Both warmed pages must be memoized so subsequent /pages requests
+    # return without rasterizing again.
+    assert entry["page_images"].get(1) == b"P1"
+    assert entry["page_images"].get(2) == b"P2"
+    assert doc_id not in main._prefetch_inflight
+
+
 def test_upload_invokes_posix_fadvise_after_prefetch(monkeypatch, tmp_path):
     """After the prefetch job warms the in-memory caches, the kernel page-
     cache hint must fire so the file's bytes can be reclaimed. On platforms
