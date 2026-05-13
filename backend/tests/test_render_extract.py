@@ -1068,6 +1068,72 @@ def test_import_docling_symbols_diagnoses_metapackage_only_install(
     assert "force-reinstall" in msg, msg
 
 
+def test_import_docling_symbols_surfaces_numpy_abi_hint(monkeypatch, tmp_path):
+    """Repro the user-reported Windows failure mode: docling's transitive
+    sklearn import raises ValueError('numpy.dtype size changed…') because the
+    venv has numpy 1.x but sklearn was built against numpy 2.x. The submodule
+    import is wrapped in a `try/except ImportError` historically, so the
+    ValueError used to escape as a raw traceback. Now it must (a) not escape,
+    and (b) surface a hint that names numpy/sklearn and points at the
+    `pip install -r requirements.txt --upgrade` fix.
+    """
+    pkg = tmp_path / "docling"
+    (pkg / "datamodel").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "datamodel" / "__init__.py").write_text("")
+    # Reproduce numpy's actual error text — the diagnostic matches on phrase.
+    (pkg / "datamodel" / "pipeline_options.py").write_text(
+        "raise ValueError('numpy.dtype size changed, may indicate binary "
+        "incompatibility. Expected 96 from C header, got 88 from PyObject')\n"
+    )
+
+    for name in list(sys.modules):
+        if name == "docling" or name.startswith("docling."):
+            sys.modules.pop(name, None)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    main._docling_walk_cache.clear()
+
+    try:
+        with pytest.raises(ModuleNotFoundError) as excinfo:
+            main._import_docling_symbols(
+                main._PDF_PIPELINE_OPTIONS_PATHS, ("PdfPipelineOptions",)
+            )
+    finally:
+        for name in list(sys.modules):
+            if name == "docling" or name.startswith("docling."):
+                sys.modules.pop(name, None)
+        main._docling_walk_cache.clear()
+
+    msg = str(excinfo.value)
+    assert "numpy" in msg, msg
+    assert "ABI" in msg or "binary incompatibility" in msg.lower() or "size changed" in msg, msg
+    assert "requirements.txt" in msg, msg
+
+
+def test_looks_like_numpy_abi_mismatch_walks_cause_chain():
+    """The ABI signature is whatever wording numpy itself emits ('numpy.dtype
+    size changed' + 'binary incompatibility'). It can land at any depth of the
+    cause chain because docling's import bubbles through transformers → sklearn
+    → numpy before surfacing. Match on either __cause__ or __context__ so we
+    handle both 'raise X from Y' and the implicit chaining Python adds when an
+    exception is raised inside an except handler.
+    """
+    deep = ValueError(
+        "numpy.dtype size changed, may indicate binary incompatibility. "
+        "Expected 96 from C header, got 88 from PyObject"
+    )
+    mid = ImportError("cannot import name 'sklearn.metrics'")
+    mid.__cause__ = deep
+    top = ImportError("docling.document_converter")
+    top.__context__ = mid
+
+    assert main._looks_like_numpy_abi_mismatch(top) is True
+
+    # And it must NOT fire on unrelated ValueErrors.
+    assert main._looks_like_numpy_abi_mismatch(ValueError("totally unrelated")) is False
+    assert main._looks_like_numpy_abi_mismatch(ImportError("no module 'foo'")) is False
+
+
 def test_diagnose_docling_install_passes_when_pipeline_options_present(
     monkeypatch, tmp_path
 ):
