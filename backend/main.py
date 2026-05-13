@@ -1130,7 +1130,20 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
     """
     source_path = filepath
     if filepath.suffix.lower() in (".docx", ".pptx"):
-        converted = _convert_to_pdf(filepath)
+        # _convert_to_pdf imports pythoncom/win32com at call time, which
+        # raises ModuleNotFoundError on non-Windows hosts (and the Office
+        # COM dispatch itself can raise on a Windows box without Word /
+        # PowerPoint installed). Catch both so we fall back to the original
+        # file instead of failing extraction outright.
+        try:
+            converted = _convert_to_pdf(filepath)
+        except Exception:
+            logger.exception(
+                "DOCX/PPTX→PDF conversion failed for %s; running Docling "
+                "on the original file",
+                filepath.name,
+            )
+            converted = None
         if converted is not None and converted.exists():
             source_path = converted
         # Conversion failed (no Office, mid-write crash, etc.): fall back to
