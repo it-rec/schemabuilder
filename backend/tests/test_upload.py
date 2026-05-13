@@ -125,6 +125,28 @@ def test_upload_size_cap_rejects_oversized(client, monkeypatch):
     assert not any(main.TEST_DOCS_DIR.glob("big*"))
 
 
+def test_upload_kicks_background_prefetch(client, monkeypatch):
+    """The upload handler warms render + text caches in the background so the
+    user's first click on the new document doesn't wait for Docling + render.
+    Verifies the prefetch is invoked with the correct doc_id + path."""
+    calls = []
+
+    def fake_kick(doc_id: str, filepath: Path) -> None:
+        calls.append((doc_id, filepath))
+
+    monkeypatch.setattr(main, "_kick_background_prefetch", fake_kick)
+    resp = client.post(
+        "/api/documents",
+        files={"file": ("warm.pdf", BytesIO(_PDF_BYTES), "application/pdf")},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(calls) == 1
+    kicked_doc_id, kicked_path = calls[0]
+    assert kicked_doc_id == body["id"]
+    assert kicked_path == main.TEST_DOCS_DIR / "warm.pdf"
+
+
 def test_upload_accepts_docx_and_pptx_extensions(client):
     for fname in ("doc.docx", "deck.pptx"):
         resp = client.post(
