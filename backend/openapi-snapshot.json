@@ -580,6 +580,55 @@
         "summary": "Patch Definition"
       }
     },
+    "/api/definitions/{def_id}/codegen": {
+      "get": {
+        "description": "Render the definition as a downstream artifact.\n\nHands the same schema the matcher uses to a downstream consumer \u2014 a\nJSON Schema validator, a data-warehouse DDL, or a typed TypeScript\nclient \u2014 without anyone having to keep a hand-written copy in sync.\nField types are inferred from `normalizer` / `available_options`;\narray fields become a child table (SQL) / nested object array\n(JSON Schema, TS).",
+        "operationId": "definition_codegen_api_definitions__def_id__codegen_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "def_id",
+            "required": true,
+            "schema": {
+              "title": "Def Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Output format. One of: json-schema, sql-postgres, sql-bigquery, typescript.",
+            "in": "query",
+            "name": "format",
+            "required": true,
+            "schema": {
+              "description": "Output format. One of: json-schema, sql-postgres, sql-bigquery, typescript.",
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Definition Codegen"
+      }
+    },
     "/api/definitions/{def_id}/fields/{field_name}/examples": {
       "post": {
         "description": "Append a value to a field's `examples` list (click-to-teach).\n\nSupports a dotted path for one level of array sub-fields, e.g.\n``line_items.amount`` resolves to the ``amount`` sub-field of the\n``line_items`` array. Refuses duplicates with 409 so a repeated click\ndoesn't silently no-op (the caller can swallow the 409 if it prefers\nidempotent behavior).\n\nWrite-side is serialized on `_definitions_lock` and persisted via\n`_atomic_write_json`, matching every other definition mutation.",

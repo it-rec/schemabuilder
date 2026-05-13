@@ -21,6 +21,7 @@ beforeEach(() => {
   api.fetchTemplates.mockReset();
   api.fetchTemplates.mockResolvedValue([]);
   api.fetchTemplate.mockReset();
+  api.fetchDefinitionCodegen.mockReset();
 });
 
 afterEach(() => {
@@ -390,4 +391,53 @@ test("edit flow: parses visible_if 'field=value' into a condition object", async
     field: "method",
     equals: "card",
   });
+});
+
+test("edit flow: export menu downloads the chosen codegen artifact", async () => {
+  const user = userEvent.setup();
+  api.fetchDefinition.mockResolvedValue({
+    document: { document_type: "Invoice", fields: [] },
+  });
+  const blob = new Blob(["export interface Invoice {}\n"], {
+    type: "text/plain",
+  });
+  api.fetchDefinitionCodegen.mockResolvedValue({
+    blob,
+    filename: "invoice.ts",
+  });
+  // jsdom doesn't implement URL.createObjectURL / revokeObjectURL — stub
+  // them so the download path runs and we can assert the blob was wired
+  // to the anchor before revocation.
+  const createObjectURL = vi.fn(() => "blob:invoice");
+  const revokeObjectURL = vi.fn();
+  vi.spyOn(URL, "createObjectURL").mockImplementation(createObjectURL);
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(revokeObjectURL);
+  const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(() => {});
+
+  render(
+    <DefinitionEditor
+      open
+      mode="edit"
+      definitionId="invoice"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  await screen.findByDisplayValue("Invoice");
+  // Open the overflow menu, then pick TypeScript.
+  await user.click(screen.getByTestId("def-export-menu"));
+  await user.click(screen.getByTestId("def-export-typescript"));
+
+  await waitFor(() =>
+    expect(api.fetchDefinitionCodegen).toHaveBeenCalledWith(
+      "invoice",
+      "typescript",
+    ),
+  );
+  expect(createObjectURL).toHaveBeenCalledWith(blob);
+  expect(anchorClick).toHaveBeenCalledTimes(1);
+  expect(revokeObjectURL).toHaveBeenCalledWith("blob:invoice");
 });

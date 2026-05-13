@@ -10,6 +10,8 @@ import {
   ModalFooter,
   ModalHeader,
   NumberInput,
+  OverflowMenu,
+  OverflowMenuItem,
   TextArea,
   TextInput,
 } from "@carbon/react";
@@ -17,11 +19,23 @@ import { Add, TrashCan } from "@carbon/react/icons";
 import {
   deleteDefinition,
   fetchDefinition,
+  fetchDefinitionCodegen,
   fetchTemplate,
   fetchTemplates,
   updateDefinition,
   uploadDefinition,
 } from "../services/api";
+
+// Codegen targets exposed by the "Export schema" overflow menu in edit mode.
+// Keep in sync with `backend/codegen.py::SUPPORTED_FORMATS` — the backend
+// rejects anything else with a 400, so a typo here surfaces as an error
+// notification rather than a silent no-op.
+const CODEGEN_FORMATS = [
+  { id: "json-schema", label: "JSON Schema (.json)" },
+  { id: "sql-postgres", label: "PostgreSQL DDL (.sql)" },
+  { id: "sql-bigquery", label: "BigQuery DDL (.sql)" },
+  { id: "typescript", label: "TypeScript types (.ts)" },
+];
 
 // Carbon Dropdown items for the `type` selector. `scalar` is the implicit
 // default in existing JSON definitions (absent `type` key); we keep it as an
@@ -733,6 +747,33 @@ export default function DefinitionEditor({
     }
   }, [errors, draft, original, mode, definitionId, onSaved]);
 
+  const handleExport = useCallback(
+    async (format) => {
+      if (mode !== "edit" || !definitionId) return;
+      setError(null);
+      try {
+        const { blob, filename } = await fetchDefinitionCodegen(
+          definitionId,
+          format,
+        );
+        // Same download trick as BatchExtractModal: build an object URL,
+        // synthesize an anchor with the server-supplied filename, click,
+        // then revoke the URL so we don't pin the blob in memory.
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        setError(err.message || "Failed to export schema.");
+      }
+    },
+    [mode, definitionId],
+  );
+
   const handleDelete = useCallback(async () => {
     if (mode !== "edit" || !definitionId) return;
     // eslint-disable-next-line no-alert
@@ -866,6 +907,25 @@ export default function DefinitionEditor({
         )}
       </ModalBody>
       <ModalFooter>
+        {mode === "edit" && (
+          <OverflowMenu
+            size="sm"
+            flipped
+            iconDescription="Export schema"
+            menuOptionsClass="definition-editor__export-menu"
+            data-testid="def-export-menu"
+            disabled={saving || deleting || loading}
+          >
+            {CODEGEN_FORMATS.map((opt) => (
+              <OverflowMenuItem
+                key={opt.id}
+                itemText={opt.label}
+                onClick={() => handleExport(opt.id)}
+                data-testid={`def-export-${opt.id}`}
+              />
+            ))}
+          </OverflowMenu>
+        )}
         {mode === "edit" && onShowHistory && (
           <Button
             kind="ghost"

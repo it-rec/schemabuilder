@@ -30,6 +30,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import codegen as _codegen
 import dependencies as _dependencies
 import llm_fallback as _llm_fallback
 from extraction_cache import (
@@ -2908,6 +2909,46 @@ def _read_version(def_id: str, version_id: str) -> Optional[dict]:
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+@app.get("/api/definitions/{def_id}/codegen")
+def definition_codegen(
+    def_id: str,
+    format: str = Query(
+        ...,
+        description=(
+            "Output format. One of: json-schema, sql-postgres, sql-bigquery, "
+            "typescript."
+        ),
+    ),
+):
+    """Render the definition as a downstream artifact.
+
+    Hands the same schema the matcher uses to a downstream consumer — a
+    JSON Schema validator, a data-warehouse DDL, or a typed TypeScript
+    client — without anyone having to keep a hand-written copy in sync.
+    Field types are inferred from `normalizer` / `available_options`;
+    array fields become a child table (SQL) / nested object array
+    (JSON Schema, TS).
+    """
+    _validate_def_id_shape(def_id)
+    defs = _load_definitions()
+    if def_id not in defs:
+        raise HTTPException(status_code=404, detail="Definition not found")
+    if format not in _codegen.SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "format must be one of: "
+                + ", ".join(sorted(_codegen.SUPPORTED_FORMATS))
+            ),
+        )
+    body, media_type, filename = _codegen.render(defs[def_id], format)
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/definitions/{def_id}/versions")

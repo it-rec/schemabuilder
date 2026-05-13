@@ -146,3 +146,15 @@ Shipped on branch `claude/brainstorm-features-Klzn8`:
   2+); array-field result includes `pages_spanned: [1,2,...]` and
   `is_multi_page` so the FE can badge "pages 1–3"; `header_pattern`
   validated as a compilable regex at upload time)
+
+Shipped on branch `claude/brainstorm-new-features-Yx922`:
+- Schema codegen / downstream artifacts (`backend/codegen.py` renders a
+  definition as JSON Schema, PostgreSQL DDL, BigQuery DDL, or a
+  TypeScript interface; scalar type is inferred from `normalizer` and
+  `available_options` becomes an enum / string union; `type: "array"`
+  fields fan out into a child table keyed on `doc_id` for SQL and a
+  nested object array for JSON Schema / TS; new
+  `GET /api/definitions/{def_id}/codegen?format=…` returns an
+  `attachment` with the right `Content-Disposition`; editor footer
+  gains an "Export schema" overflow menu with one item per format,
+  triggering a blob download)

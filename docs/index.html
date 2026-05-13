@@ -66,6 +66,7 @@
           <ul>
             <li><a href="#doc-upload">Document upload &amp; delete</a></li>
             <li><a href="#export">Target-table export (CSV / JSON)</a></li>
+            <li><a href="#schema-codegen">Schema codegen (JSON Schema / SQL / TypeScript)</a></li>
           </ul>
         </div>
 
@@ -268,6 +269,22 @@
         and streams the result as CSV or JSON. The transform engine sits
         outside the matcher, so editing a target table doesn't invalidate the
         extraction cache.
+      </p>
+
+      <h3 id="schema-codegen">Schema codegen (JSON Schema / SQL / TypeScript)</h3>
+      <p>
+        The same definition that drives extraction can be handed to a
+        downstream consumer without a manual re-write. The editor's
+        <em>Export schema</em> menu downloads the current definition as a
+        JSON Schema document, a PostgreSQL or BigQuery <code>CREATE TABLE</code>
+        block, or a TypeScript interface. Scalar types are inferred from the
+        field's normalizer (<code>number</code>, <code>currency</code>, and
+        <code>percent</code> become numeric; <code>date</code> becomes a
+        date; <code>boolean</code> becomes boolean); <code>available_options</code>
+        becomes an enum or string-literal union; <code>type: array</code>
+        fields fan out into one child table (SQL) or a nested object array
+        (JSON Schema / TS) so the output drops cleanly into a warehouse or a
+        typed pipeline.
       </p>
 
       <h3 id="dark-mode">Dark mode &amp; keyboard navigation</h3>
