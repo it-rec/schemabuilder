@@ -2,6 +2,10 @@
 
 A full-stack web application for viewing and analyzing documents (PDF, DOCX, PPTX) with intelligent text extraction and visualization.
 
+> **Features:** see the full list and detailed descriptions on the
+> [GitHub Pages site](https://it-rec.github.io/schemabuilder/) (source in
+> [`docs/`](docs/index.html)).
+
 ## Prerequisites
 
 - Python 3.11+ (3.14 supported; see `backend/requirements.txt`)

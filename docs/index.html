@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Schema Builder — Features</title>
+  <meta name="description" content="Schema Builder: full-stack document extraction with a visual definition editor, click-to-teach, LLM fallback, and more." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <p class="eyebrow">Schema Builder</p>
+      <h1>Features</h1>
+      <p class="lede">
+        Schema Builder is a full-stack tool for turning unstructured documents
+        (PDF, DOCX, PPTX) into structured records. The features below describe
+        what ships today — the index links to a longer write-up further down.
+      </p>
+      <p class="meta">
+        <a href="https://github.com/it-rec/schemabuilder">Source on GitHub</a>
+        ·
+        <a href="https://github.com/it-rec/schemabuilder#readme">README</a>
+      </p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section aria-labelledby="toc-heading">
+      <h2 id="toc-heading">At a glance</h2>
+      <p>
+        Jump to any feature. Items are grouped by where they sit in the
+        extract-review-export loop.
+      </p>
+
+      <div class="toc-grid">
+        <div class="toc-group">
+          <h3>Definition authoring</h3>
+          <ul>
+            <li><a href="#definition-editor">Visual definition editor</a></li>
+            <li><a href="#templates">Starter templates library</a></li>
+            <li><a href="#version-history">Version history with diff &amp; restore</a></li>
+            <li><a href="#click-to-teach">Click-to-teach from the page</a></li>
+            <li><a href="#regex">Per-field regex / pattern slot</a></li>
+            <li><a href="#normalizers">Per-field normalizers</a></li>
+            <li><a href="#dependencies">Field dependencies (visible_if / required_if)</a></li>
+            <li><a href="#confidence">Per-field confidence thresholds</a></li>
+          </ul>
+        </div>
+
+        <div class="toc-group">
+          <h3>Extraction</h3>
+          <ul>
+            <li><a href="#docling">Docling-powered text &amp; layout extraction</a></li>
+            <li><a href="#auto-ocr">Auto-OCR routing for image-only PDFs</a></li>
+            <li><a href="#llm-fallback">Optional LLM fallback per field</a></li>
+            <li><a href="#multi-page-tables">Multi-page tables with header detection</a></li>
+            <li><a href="#bbox-overlay">Bounding-box overlay on rendered pages</a></li>
+            <li><a href="#batch">Batch extraction with progress</a></li>
+            <li><a href="#extract-cache">Persisted extraction cache (SQLite)</a></li>
+          </ul>
+        </div>
+
+        <div class="toc-group">
+          <h3>Documents &amp; output</h3>
+          <ul>
+            <li><a href="#doc-upload">Document upload &amp; delete</a></li>
+            <li><a href="#export">Target-table export (CSV / JSON)</a></li>
+          </ul>
+        </div>
+
+        <div class="toc-group">
+          <h3>UX</h3>
+          <ul>
+            <li><a href="#dark-mode">Dark mode &amp; keyboard navigation</a></li>
+            <li><a href="#offline-overlay">Offline overlay when the backend is down</a></li>
+          </ul>
+        </div>
+
+        <div class="toc-group">
+          <h3>Operations</h3>
+          <ul>
+            <li><a href="#observability">Health, readiness &amp; metrics endpoints</a></li>
+            <li><a href="#concurrency">Concurrency limits &amp; load shedding</a></li>
+            <li><a href="#openapi-drift">OpenAPI snapshot drift check</a></li>
+            <li><a href="#request-id">Per-request tracing IDs</a></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <hr />
+
+    <section aria-labelledby="details-heading">
+      <h2 id="details-heading">Detailed descriptions</h2>
+
+      <h3 id="definition-editor">Visual definition editor</h3>
+      <p>
+        Definitions describe what to pull out of a document — a list of fields,
+        each with examples, options, optional regex, and rendering hints.
+        Originally these had to be uploaded as raw JSON; the editor is a
+        Carbon-based modal form with live validation against the same
+        Pydantic schema the backend enforces. It preserves extra keys it
+        doesn't know about, so hand-written extensions survive a round-trip.
+      </p>
+
+      <h3 id="templates">Starter templates library</h3>
+      <p>
+        Bundled starter JSONs cover common shapes — invoice, receipt, business
+        card, purchase order, bank statement — and are served read-only via
+        <code>GET /api/templates</code>. In the editor's create flow, a
+        <em>Start from template</em> dropdown hydrates a fresh draft so users
+        don't have to start from a blank document.
+      </p>
+
+      <h3 id="version-history">Version history with diff &amp; restore</h3>
+      <p>
+        Every overwrite, PATCH, or DELETE snapshots the previous content to a
+        per-definition versions directory with a timestamp-ms filename. The
+        editor's History modal lists snapshots, renders a side-by-side
+        recursive-sorted JSON diff between any version and the current state,
+        and offers a one-click restore that PATCHes the older content back in.
+      </p>
+
+      <h3 id="click-to-teach">Click-to-teach from the page</h3>
+      <p>
+        The rendered page overlays every text entry Docling found. Clicking
+        one opens a small picker; choosing a field appends the selected text
+        to that field's <code>examples</code> list and re-runs the extraction
+        automatically. The loop between "this is wrong" and "fixed for next
+        time" closes inside the viewer — no JSON editing required.
+      </p>
+
+      <h3 id="regex">Per-field regex / pattern slot</h3>
+      <p>
+        Alongside examples and options, a field can declare a
+        <code>pattern</code>. The matcher scores regex hits at 92 and uses
+        capture group 1 (falling back to group 0) as the extracted value, so
+        an IBAN pattern returns just the IBAN even when surrounded by other
+        text. Pydantic refuses uncompilable regexes at upload time and the
+        editor surfaces compile errors live as you type.
+      </p>
+
+      <h3 id="normalizers">Per-field normalizers</h3>
+      <p>
+        Raw extracted text is rarely the value you want to store. A
+        <code>normalizer</code> slot on each field transforms it — supported
+        kinds include <code>number</code>, <code>currency</code>,
+        <code>date</code> (optionally with a format), <code>percent</code>,
+        <code>boolean</code>, <code>trim</code>, <code>lowercase</code>, and
+        <code>uppercase</code>. Both rule-based and LLM-fallback matches pass
+        through the normalizer; the panel shows the parsed value next to the
+        raw text so the transformation is visible.
+      </p>
+
+      <h3 id="dependencies">Field dependencies (visible_if / required_if)</h3>
+      <p>
+        Fields can declare visibility or required-ness conditional on other
+        fields. The grammar supports
+        <code>{field, equals|in|present|absent}</code> plus
+        <code>{all: [...]}</code> / <code>{any: [...]}</code> combinators and
+        a bare <code>true</code> for "always required". Suppressed fields are
+        wiped post-match with reason <code>hidden_by_dependency</code>;
+        required-but-missing fields surface a red <em>required</em> badge in
+        the panel rather than silently passing.
+      </p>
+
+      <h3 id="confidence">Per-field confidence thresholds</h3>
+      <p>
+        Every field can override the default 0.5 confidence cutoff with a
+        <code>min_confidence</code> between 0 and 1, exposed in the editor as
+        a percent input. Sub-threshold candidates surface as a
+        <em>review</em> hint rather than being dropped, so borderline matches
+        stay visible for human triage instead of disappearing.
+      </p>
+
+      <h3 id="docling">Docling-powered text &amp; layout extraction</h3>
+      <p>
+        Extraction is built on
+        <a href="https://github.com/DS4SD/docling">Docling</a>, which provides
+        layout-aware text with bounding boxes. The accelerator (CUDA / MPS /
+        CPU) is detected at startup and logged once so the answer to
+        <em>"is it actually using my GPU?"</em> appears in the log without
+        waiting for the first request. Thread count, OCR mode, and device can
+        all be pinned via environment variables.
+      </p>
+
+      <h3 id="auto-ocr">Auto-OCR routing for image-only PDFs</h3>
+      <p>
+        Two Docling pipelines are kept warm: a fast no-OCR converter and an
+        OCR converter. For each document the backend samples extractable text
+        with <code>pypdfium2</code> and routes digital PDFs through the fast
+        path and image-only PDFs through OCR automatically. The decision is
+        surfaced on <code>/metrics</code> and can be forced with
+        <code>DOCLING_DO_OCR</code> when the heuristic guesses wrong.
+      </p>
+
+      <h3 id="llm-fallback">Optional LLM fallback per field</h3>
+      <p>
+        Each field carries a <code>use_llm_fallback</code> flag. When the
+        rule-based matcher returns nothing for a flagged field, the backend
+        calls Claude via the Anthropic SDK with the field description and
+        the page text, using structured outputs and prompt caching. The SDK
+        is lazy-imported so it isn't a hard dependency; the model and a
+        global enable switch are env-controlled
+        (<code>SCHEMABUILDER_LLM_MODEL</code>,
+        <code>SCHEMABUILDER_LLM_ENABLED</code>). LLM-derived values are
+        tagged <em>LLM</em> in the fields panel.
+      </p>
+
+      <h3 id="multi-page-tables">Multi-page tables with header detection</h3>
+      <p>
+        Array (table) fields can set <code>multi_page</code> and supply a
+        <code>header_pattern</code> regex. Rows matching the header pattern
+        are filtered out, and when multi-page is on, rows whose tokens are a
+        subset of the sub-field-name tokens — i.e. the column header repeated
+        on later pages — are auto-skipped. The result includes
+        <code>pages_spanned</code> and <code>is_multi_page</code> so the UI
+        can badge "pages 1–3" on the table.
+      </p>
+
+      <h3 id="bbox-overlay">Bounding-box overlay on rendered pages</h3>
+      <p>
+        Every match draws a persistent ghost overlay on the page PNG. Hovering
+        a row in the fields panel highlights its overlay, and hovering an
+        overlay highlights its row — the link runs in both directions. Active
+        matches show a label with the field name and score so
+        <code>match_reason</code> and <code>match_score</code> become tangible
+        rather than abstract numbers in a table.
+      </p>
+
+      <h3 id="batch">Batch extraction with progress</h3>
+      <p>
+        <code>POST /api/extract/batch</code> enqueues a job that runs
+        sequentially behind the existing concurrency semaphore.
+        <code>GET /api/extract/batch/{id}</code> returns progress for
+        polling; <code>DELETE</code> cancels after the current document
+        finishes. The sidebar exposes a <em>Run all</em> button that opens a
+        modal with a progress bar, cancel control, and a JSON download of the
+        aggregated results.
+      </p>
+
+      <h3 id="extract-cache">Persisted extraction cache (SQLite)</h3>
+      <p>
+        The full extraction response is cached on a key combining the
+        document signature and a matcher-relevant definition hash. Edits to
+        <code>target_tables</code> don't invalidate (they don't affect
+        matching); deleting a document invalidates by signature. The cache
+        survives restarts, is bounded by an LRU on <code>created_at</code>,
+        and a <code>?refresh=true</code> query bypasses it on demand.
+      </p>
+
+      <h3 id="doc-upload">Document upload &amp; delete</h3>
+      <p>
+        <code>POST /api/documents</code> accepts uploads with filename
+        sanitization, collision suffixing, and a separate 50 MB body cap
+        independent of the regular request limit.
+        <code>DELETE /api/documents/{id}</code> purges the render and text
+        caches so a re-upload doesn't serve stale pages. The sidebar adds an
+        Upload button and a per-row trash icon.
+      </p>
+
+      <h3 id="export">Target-table export (CSV / JSON)</h3>
+      <p>
+        Definitions can describe one or more <code>target_tables</code> —
+        named outputs built from extracted fields via simple transforms
+        (rename, join, format). The export endpoint executes those transforms
+        and streams the result as CSV or JSON. The transform engine sits
+        outside the matcher, so editing a target table doesn't invalidate the
+        extraction cache.
+      </p>
+
+      <h3 id="dark-mode">Dark mode &amp; keyboard navigation</h3>
+      <p>
+        A theme toggle in the header flips between Carbon's g10 and g90
+        themes, persisted to <code>localStorage</code> with the OS
+        <code>prefers-color-scheme</code> as the first-load default. Keyboard
+        shortcuts cycle documents (<kbd>j</kbd> / <kbd>↓</kbd>,
+        <kbd>k</kbd> / <kbd>↑</kbd>) and pages (<kbd>←</kbd> / <kbd>→</kbd>),
+        all suppressed when focus is in a form control so they don't fight
+        with typing.
+      </p>
+
+      <h3 id="offline-overlay">Offline overlay when the backend is down</h3>
+      <p>
+        When the backend is unreachable, a Carbon overlay pauses the UI with
+        a single steady reconnect indicator (intentionally one indicator,
+        not flickering retry chrome). Reconnect is automatic and the overlay
+        dismisses itself once health checks succeed again.
+      </p>
+
+      <h3 id="observability">Health, readiness &amp; metrics endpoints</h3>
+      <p>
+        <code>/health</code> is a true liveness probe — 200 whenever the
+        process is up — and reports directory existence, warm-up status, and
+        in-flight count. <code>/ready</code> is a separate readiness probe
+        that returns <code>503 Retry-After: 5</code> until the no-OCR
+        pipeline has loaded. <code>/metrics</code> reports cache hits/misses,
+        OCR routing decisions, completed extractions, and concurrency
+        rejections.
+      </p>
+
+      <h3 id="concurrency">Concurrency limits &amp; load shedding</h3>
+      <p>
+        <code>/extract</code> is bounded by a process-global semaphore
+        (<code>SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS</code>, default 4).
+        Excess requests get <code>503 Retry-After: 5</code> rather than
+        queuing behind the serialized Docling pipeline, so clients and any
+        upstream load balancer can shed load instead of stacking up. The
+        body size limit is enforced via <code>Content-Length</code> so
+        oversized payloads never stream into memory.
+      </p>
+
+      <h3 id="openapi-drift">OpenAPI snapshot drift check</h3>
+      <p>
+        <code>openapi-snapshot.json</code> is committed to the repo. A pytest
+        case and a dedicated CI step diff the live FastAPI schema against
+        the snapshot; if anything has shifted, the build fails with a clear
+        <em>run python export_openapi.py SNAPSHOT</em> instruction. Frontend
+        and backend can't drift on the API surface without someone noticing.
+      </p>
+
+      <h3 id="request-id">Per-request tracing IDs</h3>
+      <p>
+        Every response carries an <code>X-Request-ID</code> header — echoed
+        from the inbound header if present, generated otherwise. Log lines
+        emitted while handling a request are prefixed with the same id, so
+        a single failed call can be traced end-to-end through the server
+        log without grepping by timestamp.
+      </p>
+    </section>
+
+    <hr />
+
+    <section aria-labelledby="getting-started-heading">
+      <h2 id="getting-started-heading">Getting started</h2>
+      <p>
+        See the
+        <a href="https://github.com/it-rec/schemabuilder#getting-started">README</a>
+        for setup, the
+        <a href="https://github.com/it-rec/schemabuilder#api">API reference</a>,
+        and the
+        <a href="https://github.com/it-rec/schemabuilder#configuration">configuration table</a>.
+      </p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>Schema Builder · <a href="https://github.com/it-rec/schemabuilder">it-rec/schemabuilder</a></p>
+    </div>
+  </footer>
+</body>
+</html>
