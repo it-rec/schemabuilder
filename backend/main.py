@@ -609,11 +609,15 @@ def _get_document_id(filename: str) -> str:
     return hashlib.md5(filename.encode()).hexdigest()[:12]
 
 
-def _open_pdf_metadata(filepath: Path) -> tuple[Optional[Path], int, dict]:
-    """Open the PDF (converting if needed) and return (pdf_path, num_pages, page_dimensions).
+def _open_pdf_metadata_and_render(
+    filepath: Path, pages_to_render: list[int]
+) -> tuple[Optional[Path], int, dict, dict[int, bytes]]:
+    """Open the PDF once and return (pdf_path, num_pages, page_dimensions, page_pngs).
 
-    Page dimension queries are cheap; rendering is deferred to _render_page so
-    selecting a document doesn't block on rasterizing every page.
+    Fuses the metadata read with rasterization of any requested pages so a
+    cold prefetch makes a single pdfium open instead of one per
+    (metadata + each warmed page). pages_to_render=[] preserves the original
+    metadata-only behavior used by _open_pdf_metadata.
     """
     import pypdfium2 as pdfium
 
@@ -622,8 +626,9 @@ def _open_pdf_metadata(filepath: Path) -> tuple[Optional[Path], int, dict]:
         pdf_path = _convert_to_pdf(filepath)
 
     if not pdf_path or not pdf_path.exists():
-        return None, 0, {}
+        return None, 0, {}, {}
 
+    page_pngs: dict[int, bytes] = {}
     with _pdfium_lock:
         pdf_doc = pdfium.PdfDocument(str(pdf_path))
         try:
@@ -635,9 +640,29 @@ def _open_pdf_metadata(filepath: Path) -> tuple[Optional[Path], int, dict]:
                     "width": float(page.get_width()),
                     "height": float(page.get_height()),
                 }
+            for page_no in pages_to_render:
+                if 1 <= page_no <= num_pages:
+                    page = pdf_doc[page_no - 1]
+                    bitmap = page.render(scale=2.0)
+                    pil_image = bitmap.to_pil()
+                    buf = io.BytesIO()
+                    # Match _render_single_page's compress_level=1 trade-off.
+                    pil_image.save(buf, format="PNG", compress_level=1)
+                    page_pngs[page_no] = buf.getvalue()
         finally:
             pdf_doc.close()
 
+    return pdf_path, num_pages, page_dimensions, page_pngs
+
+
+def _open_pdf_metadata(filepath: Path) -> tuple[Optional[Path], int, dict]:
+    """Open the PDF (converting if needed) and return (pdf_path, num_pages, page_dimensions).
+
+    Thin wrapper over _open_pdf_metadata_and_render for metadata-only callers.
+    """
+    pdf_path, num_pages, page_dimensions, _ = _open_pdf_metadata_and_render(
+        filepath, []
+    )
     return pdf_path, num_pages, page_dimensions
 
 
@@ -1321,9 +1346,17 @@ _text_extract_locks: dict = {}
 _text_extract_locks_lock = threading.Lock()
 
 
-def _get_or_render(filepath: Path) -> dict:
+def _get_or_render(
+    filepath: Path, warm_pages: Optional[list[int]] = None
+) -> dict:
     """Render-only path: opens the PDF and records dimensions. Page images are
     populated on demand by _render_page.
+
+    When `warm_pages` is given and the entry is built fresh (cache miss),
+    those pages are rasterized inside the same pdfium open used for metadata,
+    so a cold prefetch costs one open instead of one per page. On a cache
+    hit, `warm_pages` is ignored; the caller can fall back to `_render_page`
+    for anything still missing.
 
     Cache entries record the source file's signature; if the file changes on
     disk the entry is rebuilt instead of returning stale page dimensions or a
@@ -1352,13 +1385,19 @@ def _get_or_render(filepath: Path) -> dict:
 
         # Heavy work outside the global lock so other docs can be served in
         # parallel. Office COM conversion for DOCX/PPTX can take seconds.
-        pdf_path, num_pages, page_dimensions = _open_pdf_metadata(filepath)
+        if warm_pages:
+            pdf_path, num_pages, page_dimensions, page_pngs = (
+                _open_pdf_metadata_and_render(filepath, warm_pages)
+            )
+        else:
+            pdf_path, num_pages, page_dimensions = _open_pdf_metadata(filepath)
+            page_pngs = {}
         entry = {
             "filename": filepath.name,
             "num_pages": max(num_pages, 1),
             "page_dimensions": page_dimensions,
             "pdf_path": str(pdf_path) if pdf_path else None,
-            "page_images": {},
+            "page_images": dict(page_pngs),
             "_sig": sig,
             # Per-doc lock so two concurrent requests for the same page don't
             # both run pdfium and rasterize the same bitmap. Different docs
@@ -1477,19 +1516,26 @@ def _kick_background_prefetch(doc_id: str, filepath: Path) -> None:
 
     def _job():
         try:
+            # Cold path (upload): one pdfium open covers metadata + page 1/2.
+            # Warm path (view): _get_or_render hits cache and warm_pages is
+            # ignored, so fall back to _render_page for anything still missing.
             try:
-                _render_page(filepath, 1)
+                data = _get_or_render(filepath, warm_pages=[1, 2])
             except Exception:
-                logger.exception("Prefetch page-1 render failed for %s", filepath.name)
-            # Warm page 2 too so a click on "next page" finds the bytes
-            # already memoized. Cheap: shares the open PdfDocument inside
-            # _render_page and just rasterizes one extra bitmap.
-            try:
-                meta = _render_cache.get(doc_id)
-                if meta and meta.get("num_pages", 0) >= 2:
-                    _render_page(filepath, 2)
-            except Exception:
-                logger.exception("Prefetch page-2 render failed for %s", filepath.name)
+                logger.exception("Prefetch metadata open failed for %s", filepath.name)
+                data = None
+            if data is not None:
+                page_images = data.get("page_images") or {}
+                try:
+                    if 1 not in page_images:
+                        _render_page(filepath, 1)
+                except Exception:
+                    logger.exception("Prefetch page-1 render failed for %s", filepath.name)
+                try:
+                    if data.get("num_pages", 0) >= 2 and 2 not in page_images:
+                        _render_page(filepath, 2)
+                except Exception:
+                    logger.exception("Prefetch page-2 render failed for %s", filepath.name)
             # Respect the global extraction cap: prefetch warm-up runs the
             # same Docling pipeline as /extract, so unconditionally firing it
             # would double the effective concurrency vs. _MAX_CONCURRENT_EXTRACTS.

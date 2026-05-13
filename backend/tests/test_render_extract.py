@@ -170,6 +170,35 @@ def test_render_single_page_closes_doc_on_exception(monkeypatch):
     assert doc._closed
 
 
+# ── _open_pdf_metadata_and_render ───────────────────────────────────────
+
+
+def test_open_pdf_metadata_and_render_single_open(monkeypatch, tmp_path):
+    """Fused path must construct PdfDocument exactly once even when
+    rasterizing multiple pages — that's the whole point of the fusion."""
+    pages = [_FakePdfPage(612.0, 792.0, b"P1"), _FakePdfPage(595.0, 842.0, b"P2")]
+    doc = _FakePdfDocument(pages)
+    opens = {"n": 0}
+
+    def fake_pdf_document(_path):
+        opens["n"] += 1
+        return doc
+
+    monkeypatch.setitem(
+        sys.modules, "pypdfium2", types.SimpleNamespace(PdfDocument=fake_pdf_document)
+    )
+    f = tmp_path / "fused.pdf"
+    f.write_bytes(b"%PDF")
+    pdf_path, n, dims, pngs = main._open_pdf_metadata_and_render(f, [1, 2])
+    assert opens["n"] == 1
+    assert pdf_path == f
+    assert n == 2
+    assert dims[1]["width"] == 612.0 and dims[2]["height"] == 842.0
+    assert pngs[1] == b"P1"
+    assert pngs[2] == b"P2"
+    assert doc._closed
+
+
 # ── _get_or_render integration ──────────────────────────────────────────
 
 
