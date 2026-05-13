@@ -12,6 +12,22 @@ python-docx==1.2.0
 python-pptx==1.0.2
 Pillow==12.2.0
 
+# Pin numpy to the 2.x ABI. Docling 2.93 (and the pypdfium2 / torch wheels
+# it pulls in transitively) are built against numpy>=2.0, whose C dtype
+# struct is 96 bytes. Letting pip resolve to numpy 1.x (88-byte dtype)
+# satisfies version constraints but crashes the first time a compiled
+# extension touches an ndarray with:
+#
+#   ValueError: numpy.dtype size changed, may indicate binary
+#   incompatibility. Expected 96 from C header, got 88 from PyObject
+#
+# Surfaces in /api/documents/{id}/extract as a generic extraction_error
+# banner in the UI. Pinning the ABI here makes a fresh `pip install -r`
+# resolve to a matching numpy; existing venvs need
+# `pip install -r requirements.txt --upgrade` (or a Docker rebuild) to
+# actually pick up the new pin.
+numpy>=2.0,<3
+
 # Docling pulls in torch as a transitive dependency. To get GPU acceleration
 # (5-20x faster extraction on CUDA), install a CUDA wheel BEFORE running pip
 # install -r requirements.txt, e.g.:
