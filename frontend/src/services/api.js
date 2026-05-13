@@ -282,6 +282,26 @@ export async function fetchTemplate(templateId, { signal } = {}) {
   return res.json();
 }
 
+// Render a definition as a downstream artifact (JSON Schema / SQL DDL / TS).
+// Returns `{ blob, filename }` so the caller can trigger a download the same
+// way as `exportTableCsv` does — the backend provides the filename via
+// Content-Disposition and a fallback is constructed from the format hint.
+export async function fetchDefinitionCodegen(defId, format, { signal } = {}) {
+  const qs = new URLSearchParams({ format });
+  const res = await request(
+    `/api/definitions/${encodeURIComponent(defId)}/codegen?${qs}`,
+    {
+      signal,
+      errorFallback: "Failed to export schema",
+    },
+  );
+  const cd = res.headers.get("content-disposition") || "";
+  const m = /filename="([^"]+)"/.exec(cd);
+  const filename = m ? m[1] : `${defId}.${format}.txt`;
+  const blob = await res.blob();
+  return { blob, filename };
+}
+
 export async function deleteDefinition(defId, { signal } = {}) {
   const res = await request(`/api/definitions/${defId}`, {
     method: "DELETE",
