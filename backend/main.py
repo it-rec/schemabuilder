@@ -525,6 +525,19 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
     import pythoncom
     import win32com.client
 
+    def _dispatch_office(progid: str):
+        # Prefer early binding via gencache.EnsureDispatch: it runs makepy to
+        # generate strongly-typed proxies from the typelib. Late-bound
+        # Dispatch falls back to dynamic.py, where the IDispatch proxy
+        # returned by Documents.Open does not always resolve member names
+        # (e.g. SaveAs) via GetIDsOfNames — raising
+        # "AttributeError: Open.SaveAs". Fall back to plain Dispatch only if
+        # gencache is unavailable (e.g. read-only cache dir).
+        try:
+            return win32com.client.gencache.EnsureDispatch(progid)
+        except Exception:
+            return win32com.client.Dispatch(progid)
+
     ext = filepath.suffix.lower()
     abs_path = str(filepath.resolve())
     # Include the source extension in the temp PDF name so two source files
@@ -537,7 +550,7 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
     pythoncom.CoInitialize()
     try:
         if ext == ".docx":
-            word = win32com.client.Dispatch("Word.Application")
+            word = _dispatch_office("Word.Application")
             word.Visible = False
             try:
                 doc = word.Documents.Open(abs_path)
@@ -546,7 +559,7 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
             finally:
                 word.Quit()
         elif ext == ".pptx":
-            ppt = win32com.client.Dispatch("PowerPoint.Application")
+            ppt = _dispatch_office("PowerPoint.Application")
             try:
                 presentation = ppt.Presentations.Open(abs_path, WithWindow=False)
                 # ExportAsFixedFormat (not SaveAs FileFormat=ppSaveAsPDF) is
