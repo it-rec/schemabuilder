@@ -669,21 +669,62 @@ def _resolve_accelerator_device(AcceleratorDevice):
     return getattr(AcceleratorDevice, "AUTO", AcceleratorDevice.CPU)
 
 
-def _diagnose_docling_install() -> str | None:
-    """Detect the 'metapackage-only' broken state and return a fix hint.
+def _looks_like_numpy_abi_mismatch(exc: BaseException) -> bool:
+    """Return True if `exc` (or anything in its cause/context chain) is the
+    numpy<->sklearn ABI breakage. Matches the wording numpy itself emits."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = str(cur)
+        if (
+            isinstance(cur, ValueError)
+            and "numpy.dtype size changed" in msg
+            and "binary incompatibility" in msg
+        ):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
-    Since docling 2.20 the `docling` PyPI distribution is just a metapackage
-    that depends on `docling-slim[standard]`; the actual modules ship inside
-    `docling-slim`. If `docling-slim` is missing or its install was interrupted
-    after pip uninstalled an older `docling`, the result is a namespace where
-    `import docling.datamodel` succeeds but `docling/datamodel/pipeline_options.py`
-    doesn't exist on disk — and no amount of import-path fallback can paper
-    over that. Detect it explicitly so the warm-up error tells the user how
-    to repair their env instead of leaking yet another `ModuleNotFoundError`.
 
-    Returns an actionable English sentence, or None if docling looks healthy
-    (or isn't installed at all — let the regular error path handle that).
+def _diagnose_docling_install(cause: BaseException | None = None) -> str | None:
+    """Detect known broken-env states and return a fix hint.
+
+    Two failure modes have actually shipped to users so far; both are detected
+    here so the warm-up error tells operators what to *do* instead of leaking
+    a generic traceback:
+
+    1. **Metapackage-only install.** Since docling 2.20 the `docling` PyPI
+       distribution is just a metapackage that depends on
+       `docling-slim[standard]`; the actual modules ship inside `docling-slim`.
+       If `docling-slim` is missing or an install was interrupted, the result
+       is a namespace where `import docling.datamodel` succeeds but
+       `docling/datamodel/pipeline_options.py` doesn't exist on disk.
+
+    2. **numpy / scikit-learn ABI mismatch.** Docling pulls in `transformers`,
+       which imports `sklearn`, which is built against numpy 2.x (96-byte
+       dtype struct). If the venv resolved to numpy 1.x (88-byte dtype) before
+       the `numpy>=2.0` pin landed in requirements.txt, the very first import
+       raises `ValueError("numpy.dtype size changed, may indicate binary
+       incompatibility. Expected 96 from C header, got 88 from PyObject")`.
+       Inspect the cause chain so we can return a hint pointing at the actual
+       remedy (`pip install -r requirements.txt --upgrade`) rather than the
+       wrong "docling-slim is missing" advice.
+
+    `cause` is the exception that triggered the diagnostic, if any — used to
+    walk the cause chain for the ABI signature. Returns an actionable English
+    sentence, or None if docling looks healthy (or isn't installed at all —
+    let the regular error path handle that).
     """
+    if cause is not None and _looks_like_numpy_abi_mismatch(cause):
+        return (
+            "Detected a numpy/scikit-learn ABI mismatch ('numpy.dtype size "
+            "changed' — sklearn was built against numpy 2.x but the venv has "
+            "numpy 1.x). Repair with: "
+            "pip install -r requirements.txt --upgrade "
+            "(or pip install --upgrade 'numpy>=2.0,<3' scikit-learn) and "
+            "restart the server."
+        )
     try:
         root = importlib.import_module("docling")
     except ImportError:
@@ -801,14 +842,24 @@ def _import_docling_symbols(paths: tuple[str, ...], names: tuple[str, ...]) -> t
     the caller's existing warm-up `try/except` logs a single actionable error
     rather than leaking a generic `ImportError` for whichever symbol happened
     to break first.
+
+    We catch `Exception`, not just `ImportError`: docling's transitive imports
+    (transformers → sklearn → numpy) can raise `ValueError("numpy.dtype size
+    changed…")` when the venv has a numpy ABI mismatch. That used to escape
+    here as a bare traceback, skipping both the fallback paths and the
+    `_diagnose_docling_install()` hint. Broadening the catch routes those
+    failures through the same diagnostic surface as plain ImportError.
     """
     last_err: Exception | None = None
+    abi_err: Exception | None = None
     tried: list[str] = []
     for path in paths:
         try:
             module = importlib.import_module(path)
-        except ImportError as exc:
+        except Exception as exc:
             last_err = exc
+            if abi_err is None and _looks_like_numpy_abi_mismatch(exc):
+                abi_err = exc
             tried.append(f"{path} (import failed: {_format_import_error(exc)})")
             continue
         resolved = tuple(getattr(module, n, None) for n in names)
@@ -826,7 +877,7 @@ def _import_docling_symbols(paths: tuple[str, ...], names: tuple[str, ...]) -> t
             "; ".join(tried),
         )
         return tuple(getattr(found, n) for n in names)
-    hint = _diagnose_docling_install()
+    hint = _diagnose_docling_install(abi_err or last_err)
     suffix = f" — {hint}" if hint else ""
     raise ModuleNotFoundError(
         "Could not locate docling symbols "
