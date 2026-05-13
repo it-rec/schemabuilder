@@ -11,6 +11,9 @@ already burned a session.
 - `frontend/` — Vite + React 19 + Carbon. Vitest tests in `frontend/src/__tests__/`,
   ESLint 9 flat config in `frontend/eslint.config.js`, build config in
   `frontend/vite.config.js`.
+- `docs/` — GitHub Pages source (static HTML/CSS, served at
+  `https://it-rec.github.io/schemabuilder/`). Plain HTML — Jekyll is disabled
+  via `docs/.nojekyll`. See "GitHub Pages site (`docs/`)" below.
 - `.github/workflows/ci.yml` — the source of truth for what "green" means.
 
 ## Golden rule
@@ -188,6 +191,68 @@ at runtime — there is no helpful error.
 
 ---
 
+## GitHub Pages site (`docs/`)
+
+The Pages site at `https://it-rec.github.io/schemabuilder/` is a static
+HTML/CSS landing page served straight out of `docs/` on the default branch.
+It is **not** a Jekyll site — `docs/.nojekyll` disables Jekyll so the files
+are served verbatim. Pages config: Settings → Pages → Source =
+"Deploy from a branch" → Branch = default branch, folder = `/docs`.
+
+Files:
+- `docs/index.html` — feature index (anchor links grouped by area) at the
+  top, longer per-feature descriptions below.
+- `docs/styles.css` — Carbon-flavored typography, `prefers-color-scheme`
+  dark mode, responsive grid.
+- `docs/.nojekyll` — empty sentinel. Do not delete; without it GitHub Pages
+  runs Jekyll and may rewrite or skip files.
+
+### When to update it
+
+Update `docs/index.html` whenever you ship a feature that ends up in the
+"Shipped on branch …" list in `FEATURES.md`. The two should describe the
+same set of capabilities, just with different audiences:
+- `FEATURES.md` — internal backlog + brief shipping notes for contributors.
+- `docs/index.html` — user-facing description of what works today.
+
+Concretely, when adding a feature:
+1. Add a `<li><a href="#anchor">Name</a></li>` entry under the right
+   group in the "At a glance" grid.
+2. Add a matching `<h3 id="anchor">Name</h3>` + paragraph under "Detailed
+   descriptions" — a couple of sentences in plain English, no internal
+   ticket numbers, no branch names, no `match_reason` jargon without
+   explaining it.
+3. If the feature changes the README's setup / API / config tables, update
+   the README too — the Pages site links into those sections by anchor.
+
+When removing or renaming a feature, delete both the index entry **and**
+the `<h3>` block. Orphan anchors are a real footgun: the "At a glance"
+links will 404 in-page silently.
+
+### Sanity check before pushing
+
+After editing `docs/index.html`, run this — it catches `href="#x"` with no
+matching `id="x"` (the most common breakage):
+
+```bash
+python3 -c "
+import re
+html = open('docs/index.html').read()
+ids   = set(re.findall(r'id=\"([^\"]+)\"', html))
+hrefs = set(re.findall(r'href=\"#([^\"]+)\"', html))
+missing = hrefs - ids
+print('broken anchors:', sorted(missing) if missing else 'none')
+" </dev/null
+```
+
+Section heading ids used only via `aria-labelledby` (e.g. `toc-heading`,
+`details-heading`) are expected to be "never linked" — that's fine.
+
+There is no CI gate on this file. It will not be flagged by ruff, pytest,
+eslint, or vitest. Treat the sanity check as the gate.
+
+---
+
 ## What CI runs (`.github/workflows/ci.yml`)
 
 For reference — keep parity with this:
@@ -248,6 +313,16 @@ Python 3.11, Node 20.
     cd backend && pytest tests/ -q
     ```
     Whatever fails there is what CI will fail with.
+12. **Shipping a feature without updating `docs/index.html`.** The Pages
+    site is a separate artifact from the README and `FEATURES.md`; nothing
+    in CI checks that it's in sync. → when a feature lands in the
+    "Shipped on branch …" list in `FEATURES.md`, add a matching entry to
+    `docs/index.html` (both the index link and the description block).
+    See "GitHub Pages site (`docs/`)" above.
+13. **Deleting `docs/.nojekyll`.** Empty file, looks like clutter; without
+    it GitHub Pages runs the site through Jekyll, which mangles files
+    whose names start with `_` and applies a default theme over `index.html`.
+    → leave it alone.
 
 ---
 
