@@ -38,6 +38,7 @@
           <h3>Definition authoring</h3>
           <ul>
             <li><a href="#definition-editor">Visual definition editor</a></li>
+            <li><a href="#auto-generate">Auto-generate schema from a document</a></li>
             <li><a href="#templates">Starter templates library</a></li>
             <li><a href="#version-history">Version history with diff &amp; restore</a></li>
             <li><a href="#click-to-teach">Click-to-teach from the page</a></li>
@@ -103,6 +104,20 @@
         Carbon-based modal form with live validation against the same
         Pydantic schema the backend enforces. It preserves extra keys it
         doesn't know about, so hand-written extensions survive a round-trip.
+      </p>
+
+      <h3 id="auto-generate">Auto-generate schema from a document</h3>
+      <p>
+        When you upload a document that no existing definition fits, the
+        New-definition modal offers an <em>Auto-generate from this document</em>
+        button. The backend reads the document's text with Docling and asks
+        Claude to propose a starting schema — document type, description, and
+        a handful of likely fields with snake_case names and example values.
+        The result lands in the editor as an unsaved draft so you can rename
+        fields, drop the boilerplate ones, and click Save when it looks right.
+        Requires <code>ANTHROPIC_API_KEY</code>; same opt-in switches as the
+        per-field LLM fallback (<code>SCHEMABUILDER_LLM_ENABLED</code>,
+        <code>SCHEMABUILDER_LLM_MODEL</code>).
       </p>
 
       <h3 id="templates">Starter templates library</h3>

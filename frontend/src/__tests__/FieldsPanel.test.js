@@ -105,11 +105,61 @@ test("shows loading message when loading", () => {
   expect(screen.getByText("Extracting fields...")).toBeInTheDocument();
 });
 
-test("shows empty state when no extraction", () => {
+test("shows generic empty state when no document is selected", () => {
   render(
     <FieldsPanel extraction={null} onHoverField={() => {}} loading={false} />
   );
-  expect(screen.getByText("Select a document definition to extract fields.")).toBeInTheDocument();
+  expect(screen.getByText("Select a document")).toBeInTheDocument();
+  expect(
+    screen.getByText(/Pick a document from the list/i),
+  ).toBeInTheDocument();
+  // No CTAs without a document.
+  expect(screen.queryByTestId("fields-panel-auto-generate")).toBeNull();
+});
+
+test("shows auto-generate CTA when a document is selected but no definition matches", () => {
+  const onAutoGenerate = vi.fn();
+  const onCreateBlank = vi.fn();
+  render(
+    <FieldsPanel
+      extraction={null}
+      onHoverField={() => {}}
+      loading={false}
+      hasDocument
+      hasDefinitions
+      onAutoGenerate={onAutoGenerate}
+      onCreateBlank={onCreateBlank}
+      selectedDocLabel="invoice.pdf"
+    />,
+  );
+  expect(screen.getByText("No matching definition")).toBeInTheDocument();
+  expect(screen.getByText(/Source: invoice.pdf/)).toBeInTheDocument();
+
+  const autoGen = screen.getByTestId("fields-panel-auto-generate");
+  autoGen.click();
+  expect(onAutoGenerate).toHaveBeenCalledTimes(1);
+
+  const blank = screen.getByTestId("fields-panel-create-blank");
+  blank.click();
+  expect(onCreateBlank).toHaveBeenCalledTimes(1);
+});
+
+test("frames empty state as 'no definitions yet' when the library is empty", () => {
+  render(
+    <FieldsPanel
+      extraction={null}
+      onHoverField={() => {}}
+      loading={false}
+      hasDocument
+      hasDefinitions={false}
+      onAutoGenerate={() => {}}
+      onCreateBlank={() => {}}
+    />,
+  );
+  expect(screen.getByText("No definitions yet")).toBeInTheDocument();
+  // Both CTAs are present so the user can pick the fastest path.
+  expect(screen.getByTestId("fields-panel-auto-generate")).toBeInTheDocument();
+  expect(screen.getByTestId("fields-panel-create-blank")).toBeInTheDocument();
 });
 
 test("shows page badge for matched field", () => {

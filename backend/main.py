@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 import codegen as _codegen
 import dependencies as _dependencies
 import llm_fallback as _llm_fallback
+import llm_schema_generator as _llm_schema_generator
 from extraction_cache import (
     get_default_cache as _get_extraction_cache,
 )
@@ -485,6 +486,10 @@ _metrics: dict = {
     # fallback was invoked successfully. Useful for tracking how much
     # users are leaning on Anthropic API spend.
     "llm_fallback_used": 0,
+    # Count of LLM-generated schema suggestions returned to the user
+    # via /api/documents/{id}/suggest-definition. Same rationale as
+    # llm_fallback_used: visibility into per-request API spend.
+    "schema_suggestions": 0,
     # Incremented when a request is rejected because the global concurrency
     # cap is full. A non-zero rate here is a signal to bump
     # SCHEMABUILDER_MAX_CONCURRENT_EXTRACTS or scale the process out.
@@ -3418,6 +3423,77 @@ def extract_fields(
     out.pop("_doc_signature", None)
     out["cache_hit"] = cache_hit
     return out
+
+
+@app.post("/api/documents/{doc_id}/suggest-definition")
+def suggest_definition(doc_id: str):
+    """Ask the LLM to propose a definition for an un-classified document.
+
+    Runs when the user has uploaded a document and none of the existing
+    definitions fit. Extracts the document's text via the same Docling
+    path as /extract, hands it to `llm_schema_generator`, and returns the
+    proposed `{document: {document_type, document_description?, fields}}`
+    body so the frontend can drop it straight into the definition editor
+    for the user to review / tweak / save.
+
+    Explicitly does NOT persist the suggestion — the user reviews the
+    result and POSTs it through the regular `/api/definitions` endpoint.
+    That keeps schema generation a one-click, transparent step instead
+    of secretly writing definitions to disk on the user's behalf.
+
+    Status codes:
+    - 200: suggestion produced, body returned.
+    - 404: document id not found.
+    - 422: text extraction failed (Docling error, unsupported file).
+    - 503: LLM not configured (no ANTHROPIC_API_KEY / disabled).
+    - 502: LLM ran but didn't return a usable suggestion.
+    """
+    filepath = _find_file(doc_id)
+    if not filepath:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not _llm_schema_generator.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Schema suggestion is not configured. Set ANTHROPIC_API_KEY "
+                "and install the `anthropic` package, then retry."
+            ),
+        )
+
+    text_data = _get_or_extract_text(filepath)
+    if text_data.get("extraction_error"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not extract text from document: {text_data['extraction_error']}",
+        )
+    text_entries = text_data.get("text_entries") or []
+    document_text = "\n".join(
+        e.get("text", "") for e in text_entries if isinstance(e, dict)
+    ).strip()
+    if not document_text:
+        raise HTTPException(
+            status_code=422,
+            detail="Document has no extractable text to base a schema on.",
+        )
+
+    suggestion = _llm_schema_generator.generate_schema(
+        document_text=document_text,
+        filename_hint=filepath.name,
+    )
+    if not suggestion:
+        raise HTTPException(
+            status_code=502,
+            detail="The LLM did not return a usable schema suggestion.",
+        )
+
+    _metrics_inc("schema_suggestions")
+    # Wrap in the same envelope the /api/definitions POST consumes so the
+    # frontend can hand it back unchanged once the user clicks Save.
+    return {
+        "document_id": doc_id,
+        "document": suggestion,
+    }
 
 
 def _csv_response(table_name: str, rows: list[dict], filename_stem: str) -> Response:

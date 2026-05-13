@@ -147,6 +147,23 @@ Shipped on branch `claude/brainstorm-features-Klzn8`:
   `is_multi_page` so the FE can badge "pages 1–3"; `header_pattern`
   validated as a compilable regex at upload time)
 
+Shipped on branch `claude/auto-generate-schema-NiZ3i`:
+- Auto-generate schema from an uploaded document (when no existing
+  definition fits, the user opens the New-definition editor and clicks
+  "Auto-generate from …". The backend's new
+  `POST /api/documents/{id}/suggest-definition` extracts the document's
+  text via Docling and asks Claude — through a new
+  `backend/llm_schema_generator.py` mirroring the LLM-fallback module's
+  lazy import + structured-output + prompt-caching design — to draft a
+  `DocumentSpec`-shaped JSON. The suggestion is normalized (snake-case
+  field names, dedup, hard cap on field count) and returned to the
+  frontend, which hydrates the editor's draft so the user can review,
+  edit, and save through the regular `/api/definitions` POST. Gated by
+  `ANTHROPIC_API_KEY` + `SCHEMABUILDER_LLM_ENABLED` like LLM fallback;
+  returns 503 when not configured, 502 when the LLM produced nothing
+  useful, 422 on Docling failure. A `schema_suggestions` metric counts
+  successful drafts for cost visibility.)
+
 Shipped on branch `claude/brainstorm-new-features-Yx922`:
 - Schema codegen / downstream artifacts (`backend/codegen.py` renders a
   definition as JSON Schema, PostgreSQL DDL, BigQuery DDL, or a

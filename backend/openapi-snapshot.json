@@ -1120,6 +1120,44 @@
         "summary": "Get Page Image"
       }
     },
+    "/api/documents/{doc_id}/suggest-definition": {
+      "post": {
+        "description": "Ask the LLM to propose a definition for an un-classified document.\n\nRuns when the user has uploaded a document and none of the existing\ndefinitions fit. Extracts the document's text via the same Docling\npath as /extract, hands it to `llm_schema_generator`, and returns the\nproposed `{document: {document_type, document_description?, fields}}`\nbody so the frontend can drop it straight into the definition editor\nfor the user to review / tweak / save.\n\nExplicitly does NOT persist the suggestion \u2014 the user reviews the\nresult and POSTs it through the regular `/api/definitions` endpoint.\nThat keeps schema generation a one-click, transparent step instead\nof secretly writing definitions to disk on the user's behalf.\n\nStatus codes:\n- 200: suggestion produced, body returned.\n- 404: document id not found.\n- 422: text extraction failed (Docling error, unsupported file).\n- 503: LLM not configured (no ANTHROPIC_API_KEY / disabled).\n- 502: LLM ran but didn't return a usable suggestion.",
+        "operationId": "suggest_definition_api_documents__doc_id__suggest_definition_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "doc_id",
+            "required": true,
+            "schema": {
+              "title": "Doc Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Suggest Definition"
+      }
+    },
     "/api/extract/batch": {
       "post": {
         "description": "Kick off a batch extraction over `document_ids`.\n\nValidates the definition exists up-front (404 if not) and that the doc\ncount is within the cap (413 if not). Otherwise spawns a worker and\nreturns the new `job_id` immediately so the client can poll\n/api/extract/batch/{job_id} for progress.",
