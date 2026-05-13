@@ -199,6 +199,81 @@ def test_open_pdf_metadata_and_render_single_open(monkeypatch, tmp_path):
     assert doc._closed
 
 
+def test_open_pdf_metadata_and_render_empty_pages_returns_metadata_only(
+    monkeypatch, tmp_path
+):
+    """pages_to_render=[] is the contract _open_pdf_metadata relies on: walk
+    every page for dimensions but rasterize nothing. A regression where the
+    fused path always rendered would tank cold metadata reads."""
+    pages = [_FakePdfPage(612.0, 792.0, b"P1"), _FakePdfPage(595.0, 842.0, b"P2")]
+    doc = _FakePdfDocument(pages)
+    _install_fake_pdfium(monkeypatch, doc)
+    f = tmp_path / "meta.pdf"
+    f.write_bytes(b"%PDF")
+    pdf_path, n, dims, pngs = main._open_pdf_metadata_and_render(f, [])
+    assert pdf_path == f
+    assert n == 2
+    # Dimensions are still populated — that's the metadata-only contract.
+    assert dims[1]["width"] == 612.0 and dims[2]["width"] == 595.0
+    # No rasterization happened.
+    assert pngs == {}
+    assert doc._closed
+
+
+def test_open_pdf_metadata_and_render_skips_out_of_range_pages(
+    monkeypatch, tmp_path
+):
+    """Out-of-range page numbers in pages_to_render must be silently skipped
+    so a stale `warm_pages=[1, 2]` against a 1-page PDF doesn't blow up."""
+    pages = [_FakePdfPage(612.0, 792.0, b"ONLY")]
+    doc = _FakePdfDocument(pages)
+    _install_fake_pdfium(monkeypatch, doc)
+    f = tmp_path / "single.pdf"
+    f.write_bytes(b"%PDF")
+    # Request page 0 (under-range), page 1 (valid), page 99 (over-range).
+    _, n, _, pngs = main._open_pdf_metadata_and_render(f, [0, 1, 99])
+    assert n == 1
+    assert set(pngs) == {1}
+    assert pngs[1] == b"ONLY"
+
+
+def test_open_pdf_metadata_and_render_returns_empty_when_pdf_missing(
+    monkeypatch, tmp_path
+):
+    """If conversion returns no usable pdf_path, the fused helper must
+    return the empty 4-tuple — never try to open() a non-existent file."""
+    _install_fake_pdfium(monkeypatch, _FakePdfDocument([]))
+    monkeypatch.setattr(main, "_convert_to_pdf", lambda _p: None)
+    f = tmp_path / "noconv.docx"
+    f.write_bytes(b"PK")
+    pdf_path, n, dims, pngs = main._open_pdf_metadata_and_render(f, [1, 2])
+    assert pdf_path is None
+    assert n == 0
+    assert dims == {}
+    assert pngs == {}
+
+
+def test_open_pdf_metadata_and_render_closes_doc_on_render_exception(
+    monkeypatch, tmp_path
+):
+    """If rasterizing one of the warmed pages raises, the PdfDocument must
+    still be closed (the finally in the helper) — leaking pdfium handles
+    eventually exhausts file descriptors."""
+    pages = [_FakePdfPage(), _FakePdfPage()]
+    doc = _FakePdfDocument(pages)
+    _install_fake_pdfium(monkeypatch, doc)
+
+    def boom(_self, scale=None):
+        raise RuntimeError("render kaboom")
+
+    monkeypatch.setattr(_FakePdfPage, "render", boom)
+    f = tmp_path / "boom.pdf"
+    f.write_bytes(b"%PDF")
+    with pytest.raises(RuntimeError):
+        main._open_pdf_metadata_and_render(f, [1])
+    assert doc._closed
+
+
 # ── _get_or_render integration ──────────────────────────────────────────
 
 
@@ -253,6 +328,71 @@ def test_get_or_render_minimum_one_page(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_open_pdf_metadata", lambda fp: (None, 0, {}))
     data = main._get_or_render(f)
     assert data["num_pages"] >= 1
+
+
+def test_get_or_render_warm_pages_populates_page_images_on_miss(
+    monkeypatch, tmp_path
+):
+    """Cache miss + warm_pages must build the cache entry with page_images
+    pre-populated, dispatching through the fused helper. This is the user-
+    visible win on the cold (upload) prefetch path."""
+    main._render_cache.clear()
+    f = tmp_path / "warm.pdf"
+    f.write_bytes(b"%PDF")
+    fused_calls = []
+    plain_calls = []
+
+    def fake_fused(filepath, pages_to_render):
+        fused_calls.append(list(pages_to_render))
+        return (
+            filepath, 2,
+            {1: {"width": 1.0, "height": 1.0}, 2: {"width": 1.0, "height": 1.0}},
+            {1: b"PNG1", 2: b"PNG2"},
+        )
+
+    def fake_plain(filepath):
+        plain_calls.append(filepath)
+        return filepath, 2, {1: {"width": 1.0, "height": 1.0},
+                              2: {"width": 1.0, "height": 1.0}}
+
+    monkeypatch.setattr(main, "_open_pdf_metadata_and_render", fake_fused)
+    monkeypatch.setattr(main, "_open_pdf_metadata", fake_plain)
+    entry = main._get_or_render(f, warm_pages=[1, 2])
+    # The fused helper ran (the metadata-only path did NOT).
+    assert fused_calls == [[1, 2]]
+    assert plain_calls == []
+    assert entry["page_images"] == {1: b"PNG1", 2: b"PNG2"}
+    assert entry["num_pages"] == 2
+
+
+def test_get_or_render_warm_pages_ignored_on_cache_hit(monkeypatch, tmp_path):
+    """If the entry is already cached (warm path — view after upload-time
+    prefetch already filled metadata), warm_pages must NOT trigger a second
+    pdfium open. The caller falls back to _render_page for missing pages."""
+    main._render_cache.clear()
+    f = tmp_path / "hit.pdf"
+    f.write_bytes(b"%PDF")
+    fused_calls = []
+    plain_calls = []
+
+    def fake_fused(filepath, pages_to_render):
+        fused_calls.append(list(pages_to_render))
+        return filepath, 1, {1: {"width": 1.0, "height": 1.0}}, {}
+
+    def fake_plain(filepath):
+        plain_calls.append(filepath)
+        return filepath, 1, {1: {"width": 1.0, "height": 1.0}}
+
+    monkeypatch.setattr(main, "_open_pdf_metadata_and_render", fake_fused)
+    monkeypatch.setattr(main, "_open_pdf_metadata", fake_plain)
+    # First call: warm the cache via the metadata-only path.
+    first = main._get_or_render(f)
+    assert plain_calls == [f]
+    # Second call with warm_pages: must hit cache, must NOT call fused helper.
+    second = main._get_or_render(f, warm_pages=[1])
+    assert second is first
+    assert fused_calls == []
+    assert plain_calls == [f]  # unchanged
 
 
 # ── _render_page ────────────────────────────────────────────────────────
@@ -1604,6 +1744,62 @@ def test_kick_background_prefetch_skips_extraction_when_semaphore_full(
     finally:
         for _ in held:
             main._extract_semaphore.release()
+
+
+def test_kick_background_prefetch_cold_path_skips_render_page_for_warmed(
+    monkeypatch, tmp_path
+):
+    """The fused prefetch's whole purpose: on a cold cache, the fused open
+    populates page_images for pages 1 and 2, so `_render_page` must NOT be
+    re-invoked for those pages. A regression that always calls _render_page
+    would re-open pdfium twice more — the very serialization stretch this
+    change exists to remove."""
+    main._prefetch_inflight.clear()
+    main._render_cache.clear()
+    p = tmp_path / "cold.pdf"
+    p.write_bytes(b"%PDF")
+    doc_id = main._get_document_id(p.name)
+
+    # Make _get_or_render return as if the fused open warmed both pages.
+    def fake_get_or_render(fp, warm_pages=None):
+        assert warm_pages == [1, 2], (
+            "prefetch must request pages 1+2 via the fused warm_pages path"
+        )
+        entry = {
+            "filename": fp.name,
+            "num_pages": 2,
+            "page_dimensions": {1: {"width": 1, "height": 1},
+                                 2: {"width": 1, "height": 1}},
+            "pdf_path": str(fp),
+            "page_images": {1: b"WARM1", 2: b"WARM2"},
+            "_sig": main._file_signature(fp),
+            "_render_lock": threading.Lock(),
+        }
+        main._render_cache[doc_id] = entry
+        return entry
+
+    render_calls = []
+
+    def fake_render(fp, pn):
+        render_calls.append(pn)
+        return b""
+
+    monkeypatch.setattr(main, "_get_or_render", fake_get_or_render)
+    monkeypatch.setattr(main, "_render_page", fake_render)
+    monkeypatch.setattr(main, "_get_or_extract_text", lambda fp: {})
+
+    class _Sync:
+        def submit(self, fn, *a, **kw):
+            fn(*a, **kw)
+            return None
+
+    monkeypatch.setattr(main, "_bg_executor", _Sync())
+
+    main._kick_background_prefetch(doc_id, p)
+    # Because both pages were warmed in the fused open, _render_page must
+    # NOT have been called for either.
+    assert render_calls == []
+    assert doc_id not in main._prefetch_inflight
 
 
 def test_kick_background_prefetch_swallows_render_exception(monkeypatch, tmp_path):
