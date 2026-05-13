@@ -47,6 +47,11 @@ _MATCHING_KEYS = {
     "affix",
     "min_confidence",
     "pattern",
+    "normalizer",
+    "visible_if",
+    "required_if",
+    "multi_page",
+    "header_pattern",
     "fields",
 }
 

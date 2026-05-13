@@ -30,6 +30,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+import dependencies as _dependencies
 import llm_fallback as _llm_fallback
 from extraction_cache import (
     get_default_cache as _get_extraction_cache,
@@ -37,6 +38,9 @@ from extraction_cache import (
 from extraction_cache import (
     make_key as _make_extraction_cache_key,
 )
+from normalizers import SUPPORTED_NORMALIZERS as _SUPPORTED_NORMALIZERS
+from normalizers import normalize as _apply_normalizer
+from normalizers import parse_spec as _parse_normalizer_spec
 from transforms import TransformError, build_export
 
 # Per-request context variable, surfaced into log records via the filter below
@@ -309,6 +313,10 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 TEST_DOCS_DIR = Path(__file__).parent / "test_documents"
 DEFINITIONS_DIR = Path(__file__).parent / "definitions"
+# Read-only catalog of starter definitions. Loaded fresh on every request:
+# the directory is small (single-digit JSON files) and a stale cache would be
+# more annoying than a few hundred microseconds per call.
+TEMPLATES_DIR = Path(__file__).parent / "templates"
 # Version archive lives inside DEFINITIONS_DIR under a hidden subdir. Both
 # the dir-signature scan and the loader filter on the .json suffix, so the
 # subdirectory itself is invisible to them; only its contents (also .json)
@@ -1678,6 +1686,20 @@ def _compile_field_matchers(field: dict) -> dict:
 def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> dict:
     """Try to match a single field definition to the best text entry."""
     if field.get("type") == "array":
+        items = _match_array_field(field, text_entries, used_ids)
+        # Summarize page coverage so the UI can say "spans pages 1–3". A
+        # single page is also reported (consumers can show or hide the
+        # badge based on len(pages_spanned)); is_multi_page is the derived
+        # flag for "did this actually cross a page boundary?".
+        pages: list[int] = []
+        seen_pages: set[int] = set()
+        for item in items:
+            for sf in item.get("fields") or []:
+                p = sf.get("page")
+                if isinstance(p, int) and p not in seen_pages:
+                    seen_pages.add(p)
+                    pages.append(p)
+        pages.sort()
         result = {
             "name": field["name"],
             "description": field.get("description", ""),
@@ -1685,6 +1707,12 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             "extraction_instructions": field.get("extraction_instructions"),
             "available_options": field.get("available_options"),
             "affix": field.get("affix"),
+            "visible_if": field.get("visible_if"),
+            "required_if": field.get("required_if"),
+            "multi_page": bool(field.get("multi_page")),
+            "header_pattern": field.get("header_pattern")
+            if isinstance(field.get("header_pattern"), str)
+            else None,
             "extracted_value": None,
             "confidence": 0,
             "matched_entry_id": None,
@@ -1694,7 +1722,9 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             "match_score": 0,
             "type": "array",
             "fields": field.get("fields", []),
-            "items": _match_array_field(field, text_entries, used_ids),
+            "items": items,
+            "pages_spanned": pages,
+            "is_multi_page": len(pages) > 1,
         }
         return result
 
@@ -1822,7 +1852,14 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         "min_confidence": raw_threshold
         if isinstance(raw_threshold, (int, float)) and 0.0 <= raw_threshold <= 1.0
         else None,
+        "normalizer": field.get("normalizer"),
+        "visible_if": field.get("visible_if"),
+        "required_if": field.get("required_if"),
         "extracted_value": None,
+        # Parsed/canonical form of `extracted_value` (e.g. "1.234,56 EUR" ->
+        # 1234.56). Only present when the field carries a `normalizer` spec;
+        # null when normalization failed (e.g. unparseable date).
+        "normalized_value": None,
         "confidence": 0,
         "matched_entry_id": None,
         "page": None,
@@ -1854,6 +1891,11 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         result["bbox"] = best_match.get("bbox")
         result["match_reason"] = best_reason
         result["match_score"] = best_score
+        applied, normalized = _apply_normalizer(
+            field.get("normalizer"), result["extracted_value"]
+        )
+        if applied:
+            result["normalized_value"] = normalized
     elif best_match and best_score > 0:
         # Below threshold but non-zero: surface the rejected candidate so the
         # UI can offer a "review — was this the right value?" prompt.
@@ -1868,10 +1910,41 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
 
 
 def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
-    """Try to match array field items (like line_items) from text entries."""
+    """Try to match array field items (like line_items) from text entries.
+
+    Honors two array-level knobs for multi-page tables:
+
+      * ``header_pattern`` — optional regex. TableItem entries whose text
+        matches are skipped (typical use: drop the column-header row that
+        repeats at the top of each page).
+      * ``multi_page`` — when True, header-like rows are auto-detected on
+        pages 2+ by comparing against the *first* skipped row's text. This
+        catches headers even when the user didn't supply a pattern, as long
+        as at least one header row matched ``header_pattern`` upstream.
+    """
     sub_fields = field.get("fields", [])
     if not sub_fields:
         return []
+
+    raw_header = field.get("header_pattern")
+    header_re: Optional[re.Pattern] = None
+    if isinstance(raw_header, str) and raw_header:
+        try:
+            header_re = re.compile(raw_header)
+        except re.error:
+            header_re = None
+
+    multi_page = bool(field.get("multi_page"))
+    # Tokens drawn from sub-field names that we'll use to spot header-like
+    # rows. "product_code" -> {"product", "code"}; a row whose stripped
+    # text consists of ≥2 of these tokens (and almost nothing else) is
+    # treated as a header repeat on pages 2+.
+    name_tokens: set[str] = set()
+    if multi_page:
+        for sf in sub_fields:
+            for tok in re.split(r"[_\s]+", str(sf.get("name", "")).lower()):
+                if len(tok) >= 3:
+                    name_tokens.add(tok)
 
     # Pre-classify sub-field example shapes once instead of re-matching per entry.
     sub_specs = []
@@ -1898,13 +1971,34 @@ def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
             continue
 
         text = entry.get("text", "")
+
+        # Header-row filter: explicit regex first, then (multi_page only)
+        # the auto-detected "looks like a header" heuristic. Mark the entry
+        # as used so a later field doesn't pick it up either.
+        if header_re is not None and header_re.search(text):
+            used_ids.add(entry["id"])
+            continue
+        if multi_page and name_tokens:
+            text_tokens = {
+                t for t in re.split(r"[\W_]+", text.lower()) if t and len(t) >= 3
+            }
+            if text_tokens and len(text_tokens & name_tokens) >= 2 and text_tokens.issubset(
+                name_tokens
+            ):
+                used_ids.add(entry["id"])
+                continue
+
         item_fields = []
         for sf, kind in sub_specs:
             item_field = {
                 "name": sf["name"],
                 "description": sf.get("description", ""),
                 "examples": sf.get("examples", []),
+                "normalizer": sf.get("normalizer"),
+                "visible_if": sf.get("visible_if"),
+                "required_if": sf.get("required_if"),
                 "extracted_value": None,
+                "normalized_value": None,
                 "confidence": 0,
                 "matched_entry_id": entry["id"],
                 "page": entry.get("page"),
@@ -1933,6 +2027,12 @@ def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
                     item_field["confidence"] = 0.5
                     item_field["match_reason"] = "int_format"
                     item_field["match_score"] = 50
+            if item_field["extracted_value"] is not None:
+                applied, normalized = _apply_normalizer(
+                    sf.get("normalizer"), item_field["extracted_value"]
+                )
+                if applied:
+                    item_field["normalized_value"] = normalized
             item_fields.append(item_field)
 
         if any(f["extracted_value"] for f in item_fields):
@@ -2014,7 +2114,17 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
             # already renders that case fine and just won't draw an
             # overlay for the field.
             results[i]["rejected_candidate"] = None
+            applied, normalized = _apply_normalizer(
+                field.get("normalizer"), llm_result["value"]
+            )
+            if applied:
+                results[i]["normalized_value"] = normalized
             _metrics_inc("llm_fallback_used")
+    # Dependency evaluation runs last so it sees the final matched/normalized
+    # values (including any LLM fallback fills). Decorates each result with
+    # `is_visible`, `required`, and `required_satisfied`; suppressed fields
+    # have their extracted_value wiped so the FE can't render stale data.
+    _dependencies.apply(results)
     return results
 
 
@@ -2424,6 +2534,88 @@ def get_definition(def_id: str):
     return {"id": def_id, **defs[def_id]}
 
 
+# Restrict template ids to a safe filename slug so a malicious caller can't
+# break out of TEMPLATES_DIR with `..` / path separators / null bytes. Same
+# shape as the definition slug since the editor will typically slugify the
+# template's document_type into a brand-new definition id anyway.
+_TEMPLATE_ID_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _list_templates() -> list[dict]:
+    """Return the metadata envelope for every JSON file in TEMPLATES_DIR.
+
+    Templates are read fresh from disk (no caching) — the directory is small
+    and stays stable for the process lifetime, so the simplicity buys more
+    than the few hundred microseconds an LRU would save. Malformed entries
+    are skipped with a warning instead of raising; one bad template should
+    not take the catalog offline.
+    """
+    items: list[dict] = []
+    if not TEMPLATES_DIR.exists():
+        return items
+    try:
+        children = sorted(TEMPLATES_DIR.iterdir())
+    except OSError:
+        return items
+    for path in children:
+        if not path.is_file() or path.suffix != ".json":
+            continue
+        tid = path.stem
+        if not _TEMPLATE_ID_RE.match(tid):
+            continue
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+        except (OSError, ValueError):
+            logger.exception("Skipping unreadable template %s", path.name)
+            continue
+        doc = payload.get("document") or {}
+        items.append({
+            "id": tid,
+            "document_type": doc.get("document_type", tid),
+            "document_description": doc.get("document_description", ""),
+            "field_count": len(doc.get("fields") or []),
+        })
+    return items
+
+
+def _read_template(template_id: str) -> Optional[dict]:
+    if not _TEMPLATE_ID_RE.match(template_id):
+        return None
+    path = TEMPLATES_DIR / f"{template_id}.json"
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+@app.get("/api/templates")
+def list_templates(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List built-in starter templates the editor can clone.
+
+    Templates are read-only seeds shipped with the backend. Cloning is a
+    pure client-side operation: the frontend fetches the full template via
+    `GET /api/templates/{id}` and POSTs it as a new definition under the
+    user's chosen document_type.
+    """
+    return _paginate(_list_templates(), limit, offset)
+
+
+@app.get("/api/templates/{template_id}")
+def get_template(template_id: str):
+    """Return the full JSON of a starter template."""
+    payload = _read_template(template_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {"id": template_id, **payload}
+
+
 _DEF_ID_RE = re.compile(r'[a-z0-9_]+')
 
 
@@ -2498,6 +2690,27 @@ class FieldSpec(BaseModel):
     # doesn't fan out into surprise API spend across every field. Requires
     # ANTHROPIC_API_KEY + the `anthropic` package; silently no-op otherwise.
     use_llm_fallback: Optional[bool] = None
+    # Optional value normalizer applied to the matcher's `extracted_value`.
+    # Accepts either a bare string keyword ("currency", "date",
+    # "date:DD/MM/YYYY", ...) or a dict ({"name": "date", "format": "..."}).
+    # Unknown ids are rejected at upload time so the user finds out about a
+    # typo immediately, not silently at extract time.
+    normalizer: Optional[Any] = None
+    # Per-field dependency conditions evaluated after extraction. `visible_if`
+    # suppresses the field when its condition is false; `required_if` flags
+    # the field as a validation error when it's true and no value was found.
+    # `required_if` also accepts a bare bool. See `dependencies.py` for the
+    # condition grammar.
+    visible_if: Optional[Any] = None
+    required_if: Optional[Any] = None
+    # Array-only knobs for tables that span multiple pages. `multi_page`
+    # toggles the cross-page summary (`pages_spanned`, `is_multi_page`) and
+    # enables header-row deduplication. `header_pattern` is an optional regex;
+    # any TableItem whose text matches is skipped instead of being parsed as a
+    # row — typically used to drop column headers ("SKU | Description | Qty
+    # | Amount") that repeat at the top of each page.
+    multi_page: Optional[bool] = None
+    header_pattern: Optional[str] = None
     fields: Optional[List["FieldSpec"]] = None
 
     @field_validator("pattern")
@@ -2509,6 +2722,43 @@ class FieldSpec(BaseModel):
             re.compile(v)
         except re.error as e:
             raise ValueError(f"pattern is not a valid regular expression: {e}") from e
+        return v
+
+    @field_validator("normalizer")
+    @classmethod
+    def _validate_normalizer(cls, v: Any) -> Any:
+        if v is None or v == "":
+            return None
+        parsed = _parse_normalizer_spec(v)
+        if parsed is None:
+            allowed = ", ".join(sorted(_SUPPORTED_NORMALIZERS))
+            raise ValueError(
+                f"normalizer must be one of: {allowed} (got {v!r})"
+            )
+        return v
+
+    @field_validator("visible_if", "required_if")
+    @classmethod
+    def _validate_condition(cls, v: Any) -> Any:
+        if v is None or v == "" or isinstance(v, bool):
+            return v if isinstance(v, bool) else None
+        try:
+            _dependencies.validate_condition(v)
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+        return v
+
+    @field_validator("header_pattern")
+    @classmethod
+    def _validate_header_pattern(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        try:
+            re.compile(v)
+        except re.error as e:
+            raise ValueError(
+                f"header_pattern is not a valid regular expression: {e}"
+            ) from e
         return v
 
 

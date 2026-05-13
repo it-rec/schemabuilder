@@ -191,6 +191,17 @@
             ],
             "title": "Fields"
           },
+          "header_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header Pattern"
+          },
           "min_confidence": {
             "anyOf": [
               {
@@ -204,10 +215,30 @@
             ],
             "title": "Min Confidence"
           },
+          "multi_page": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Multi Page"
+          },
           "name": {
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "normalizer": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalizer"
           },
           "pattern": {
             "anyOf": [
@@ -219,6 +250,15 @@
               }
             ],
             "title": "Pattern"
+          },
+          "required_if": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required If"
           },
           "type": {
             "anyOf": [
@@ -241,6 +281,15 @@
               }
             ],
             "title": "Use Llm Fallback"
+          },
+          "visible_if": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visible If"
           }
         },
         "required": [
@@ -1131,6 +1180,96 @@
           }
         },
         "summary": "Get Batch Status"
+      }
+    },
+    "/api/templates": {
+      "get": {
+        "description": "List built-in starter templates the editor can clone.\n\nTemplates are read-only seeds shipped with the backend. Cloning is a\npure client-side operation: the frontend fetches the full template via\n`GET /api/templates/{id}` and POSTs it as a new definition under the\nuser's chosen document_type.",
+        "operationId": "list_templates_api_templates_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Templates"
+      }
+    },
+    "/api/templates/{template_id}": {
+      "get": {
+        "description": "Return the full JSON of a starter template.",
+        "operationId": "get_template_api_templates__template_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Template"
       }
     },
     "/health": {

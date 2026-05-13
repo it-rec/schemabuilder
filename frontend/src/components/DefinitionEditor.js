@@ -17,6 +17,8 @@ import { Add, TrashCan } from "@carbon/react/icons";
 import {
   deleteDefinition,
   fetchDefinition,
+  fetchTemplate,
+  fetchTemplates,
   updateDefinition,
   uploadDefinition,
 } from "../services/api";
@@ -28,6 +30,22 @@ import {
 const TYPE_ITEMS = [
   { id: "scalar", label: "Scalar (text / number / date)" },
   { id: "array", label: "Array (repeating items)" },
+];
+
+// Built-in normalizers supported by the backend. Keep this list in sync with
+// `backend/normalizers.py::SUPPORTED_NORMALIZERS` — the backend's Pydantic
+// validator rejects anything else, so a typo here surfaces as a save-time
+// 422 with a useful message.
+const NORMALIZER_ITEMS = [
+  { id: "", label: "None (raw text)" },
+  { id: "number", label: "Number" },
+  { id: "currency", label: "Currency (locale-aware)" },
+  { id: "date", label: "Date (auto-detect or yyyy-mm-dd)" },
+  { id: "percent", label: "Percent (5% → 0.05)" },
+  { id: "boolean", label: "Boolean (yes/no, true/false)" },
+  { id: "trim", label: "Trim whitespace" },
+  { id: "lowercase", label: "Lowercase" },
+  { id: "uppercase", label: "Uppercase" },
 ];
 
 const EMPTY_FIELD = Object.freeze({
@@ -49,6 +67,20 @@ const EMPTY_FIELD = Object.freeze({
   // Claude when the rule-based matcher came back empty; this flag is
   // the kill-switch that prevents fan-out across every field.
   use_llm_fallback: false,
+  // Value normalizer applied after the matcher finds a value. Empty string
+  // means "no normalizer" — pruned from the saved JSON.
+  normalizer: "",
+  // Dependency conditions. Stored as raw JSON strings so users can express
+  // the full {field, equals|in|present, all|any} grammar without us
+  // building a nested condition-builder UI. Empty string means "no
+  // condition" — pruned from the saved JSON. The backend validates the
+  // shape on save and surfaces a 422 with the offending payload.
+  visible_if: "",
+  required_if: "",
+  // Multi-page table knobs. Only meaningful for array fields — the form
+  // exposes them under the array branch.
+  multi_page: false,
+  header_pattern: "",
   fields: [],
 });
 
@@ -67,6 +99,17 @@ function pruneField(field) {
   if (field.affix) out.affix = true;
   if (field.pattern?.trim()) out.pattern = field.pattern.trim();
   if (field.use_llm_fallback) out.use_llm_fallback = true;
+  if (field.normalizer && field.normalizer !== "")
+    out.normalizer = field.normalizer;
+  const parsedVisible = parseConditionInput(field.visible_if);
+  if (parsedVisible !== undefined) out.visible_if = parsedVisible;
+  const parsedRequired = parseConditionInput(field.required_if);
+  if (parsedRequired !== undefined) out.required_if = parsedRequired;
+  if (field.type === "array") {
+    if (field.multi_page) out.multi_page = true;
+    if (field.header_pattern?.trim())
+      out.header_pattern = field.header_pattern.trim();
+  }
   // Only emit min_confidence when the user actually set one. Convert from
   // the 0–100 UI value back to the 0–1 backend value, clamped to range.
   if (
@@ -101,6 +144,18 @@ function hydrateField(raw) {
         : null,
     pattern: typeof raw?.pattern === "string" ? raw.pattern : "",
     use_llm_fallback: !!raw?.use_llm_fallback,
+    visible_if: stringifyCondition(raw?.visible_if),
+    required_if: stringifyCondition(raw?.required_if),
+    multi_page: !!raw?.multi_page,
+    header_pattern: typeof raw?.header_pattern === "string" ? raw.header_pattern : "",
+    normalizer:
+      typeof raw?.normalizer === "string"
+        ? raw.normalizer
+        : raw?.normalizer && typeof raw.normalizer === "object" && raw.normalizer.name
+          ? raw.normalizer.format
+            ? `${raw.normalizer.name}:${raw.normalizer.format}`
+            : raw.normalizer.name
+          : "",
     fields: Array.isArray(raw?.fields) ? raw.fields.map(hydrateField) : [],
   };
 }
@@ -112,6 +167,73 @@ function isValidRegex(s) {
   if (!s) return true;
   try {
     new RegExp(s);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Parse the visible_if / required_if free-text input the user typed.
+// Accepts:
+//   ""                          → undefined (pruned from JSON)
+//   "true" / "false"            → boolean (only meaningful for required_if)
+//   "field=value"               → {field, equals: value}
+//   "field in a,b,c"            → {field, in: [a,b,c]}
+//   "field present"             → {field, present: true}
+//   "field absent"              → {field, absent: true}
+//   any JSON object/array       → parsed verbatim (advanced use)
+// Returns the parsed value, or `undefined` when the input is blank, or
+// throws (caught by `validate()`) if the input is non-blank but
+// uninterpretable.
+function parseConditionInput(raw) {
+  if (raw == null) return undefined;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return undefined;
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    return JSON.parse(trimmed);
+  }
+  const presentMatch = /^(\w+)\s+present$/i.exec(trimmed);
+  if (presentMatch) return { field: presentMatch[1], present: true };
+  const absentMatch = /^(\w+)\s+absent$/i.exec(trimmed);
+  if (absentMatch) return { field: absentMatch[1], absent: true };
+  const inMatch = /^(\w+)\s+in\s+(.+)$/i.exec(trimmed);
+  if (inMatch) {
+    return {
+      field: inMatch[1],
+      in: inMatch[2].split(",").map((s) => s.trim()).filter(Boolean),
+    };
+  }
+  const eqMatch = /^(\w+)\s*=\s*(.+)$/.exec(trimmed);
+  if (eqMatch) return { field: eqMatch[1], equals: eqMatch[2].trim() };
+  throw new Error(
+    `Could not parse condition "${trimmed}" — try field=value, "field in a,b", "field present", or raw JSON.`,
+  );
+}
+
+function stringifyCondition(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "object") {
+    if (value.field) {
+      if ("equals" in value) return `${value.field}=${value.equals}`;
+      if (Array.isArray(value.in)) return `${value.field} in ${value.in.join(",")}`;
+      if (value.present === true) return `${value.field} present`;
+      if (value.absent === true) return `${value.field} absent`;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch (_) {
+      return "";
+    }
+  }
+  return String(value);
+}
+
+function isValidCondition(raw) {
+  try {
+    parseConditionInput(raw);
     return true;
   } catch (_) {
     return false;
@@ -141,6 +263,12 @@ function validate(draft) {
       }
       if (f.pattern && !isValidRegex(f.pattern)) {
         errors.push(`Field "${f.name || where}" has an invalid regex pattern.`);
+      }
+      if (f.visible_if && !isValidCondition(f.visible_if)) {
+        errors.push(`Field "${f.name || where}" has an invalid visible_if condition.`);
+      }
+      if (f.required_if && !isValidCondition(f.required_if)) {
+        errors.push(`Field "${f.name || where}" has an invalid required_if condition.`);
       }
       if (f.type === "array") walk(f.fields, `${where}.fields`);
     });
@@ -356,10 +484,65 @@ function FieldEditor({ field, path, onChange, onRemove, depth = 0 }) {
             checked={field.use_llm_fallback}
             onChange={(_, { checked }) => update({ use_llm_fallback: checked })}
           />
+          <Dropdown
+            id={`def-field-normalizer-${path}`}
+            titleText="Normalizer (optional)"
+            helperText="Parse the matched text into a canonical value (e.g. 1.234,56 € → 1234.56)."
+            label="Pick a normalizer…"
+            items={NORMALIZER_ITEMS}
+            itemToString={(it) => it?.label || ""}
+            selectedItem={
+              NORMALIZER_ITEMS.find((n) => n.id === (field.normalizer || "")) ||
+              NORMALIZER_ITEMS[0]
+            }
+            onChange={({ selectedItem }) =>
+              update({ normalizer: selectedItem?.id || "" })
+            }
+            size="sm"
+          />
         </>
       )}
+      <TextInput
+        id={`def-field-visibleif-${path}`}
+        labelText="Visible if (optional)"
+        helperText='Hide this field when the condition is false. e.g. "payment_method=card", "country in DE,AT,CH", "iban present", or raw JSON.'
+        placeholder="payment_method=card"
+        value={field.visible_if || ""}
+        onChange={(e) => update({ visible_if: e.target.value })}
+        invalid={!!field.visible_if && !isValidCondition(field.visible_if)}
+        invalidText="Unparseable condition."
+        size="sm"
+      />
+      <TextInput
+        id={`def-field-requiredif-${path}`}
+        labelText="Required if (optional)"
+        helperText='Flag the field as required when this condition is true. Use "true" to always require, or "field=value" / "field in a,b" / JSON.'
+        placeholder="payment_method=card"
+        value={field.required_if || ""}
+        onChange={(e) => update({ required_if: e.target.value })}
+        invalid={!!field.required_if && !isValidCondition(field.required_if)}
+        invalidText="Unparseable condition."
+        size="sm"
+      />
       {isArray && (
         <div className="definition-editor__subfields">
+          <Checkbox
+            id={`def-field-multipage-${path}`}
+            labelText="Table can span multiple pages (auto-detect repeated headers)"
+            checked={!!field.multi_page}
+            onChange={(_, { checked }) => update({ multi_page: checked })}
+          />
+          <TextInput
+            id={`def-field-headerpattern-${path}`}
+            labelText="Header row pattern (optional)"
+            helperText="Regex matching TableItem header rows to skip — e.g. ^\\s*(SKU|Description|Qty|Amount).*$"
+            placeholder="^(SKU|Description|Qty|Amount)"
+            value={field.header_pattern || ""}
+            onChange={(e) => update({ header_pattern: e.target.value })}
+            invalid={!!field.header_pattern && !isValidRegex(field.header_pattern)}
+            invalidText="Not a valid regular expression."
+            size="sm"
+          />
           <div className="definition-editor__subfields-header">
             <span>Item fields</span>
             <Button
@@ -429,6 +612,11 @@ export default function DefinitionEditor({
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  // Templates catalog for the "Start from template" picker. Fetched once when
+  // the modal opens in create mode; ignored in edit mode (the user is already
+  // working on a concrete definition).
+  const [templates, setTemplates] = useState([]);
+  const [templateLoading, setTemplateLoading] = useState(false);
 
   // Hydrate the draft when the modal opens. Reset on close so reopening
   // doesn't show stale state from a previous edit.
@@ -438,6 +626,7 @@ export default function DefinitionEditor({
       setOriginal(null);
       setError(null);
       setLoadError(null);
+      setTemplates([]);
       return undefined;
     }
     if (mode !== "edit" || !definitionId) return undefined;
@@ -464,6 +653,46 @@ export default function DefinitionEditor({
       });
     return () => ctrl.abort();
   }, [open, mode, definitionId]);
+
+  // Templates list: load once when the create-mode modal opens. Edit-mode
+  // never shows the picker, so skip the fetch in that branch.
+  useEffect(() => {
+    if (!open || mode !== "create") return undefined;
+    const ctrl = new AbortController();
+    fetchTemplates({ signal: ctrl.signal })
+      .then((items) => {
+        if (!ctrl.signal.aborted) setTemplates(items);
+      })
+      .catch((err) => {
+        if (err?.name !== "AbortError") {
+          console.error("Failed to load templates:", err);
+        }
+      });
+    return () => ctrl.abort();
+  }, [open, mode]);
+
+  const handleApplyTemplate = useCallback(async (templateId) => {
+    if (!templateId) return;
+    setTemplateLoading(true);
+    setError(null);
+    try {
+      const tpl = await fetchTemplate(templateId);
+      const doc = tpl?.document || {};
+      setDraft({
+        documentType: doc.document_type ?? "",
+        description: doc.document_description ?? "",
+        fields: Array.isArray(doc.fields) ? doc.fields.map(hydrateField) : [],
+      });
+      // Preserve extras (e.g. `target_tables`) by stashing the template as
+      // the editor's `original` — `buildPayload` merges its top-level keys
+      // back into the saved JSON, exactly the way edit-mode hydration does.
+      setOriginal(tpl);
+    } catch (err) {
+      setError(err.message || "Failed to load template.");
+    } finally {
+      setTemplateLoading(false);
+    }
+  }, []);
 
   const errors = useMemo(() => validate(draft), [draft]);
 
@@ -553,6 +782,25 @@ export default function DefinitionEditor({
         )}
         {!loadError && !loading && (
           <div className="definition-editor__body">
+            {mode === "create" && templates.length > 0 && (
+              <Dropdown
+                id="def-template-picker"
+                titleText="Start from template (optional)"
+                helperText="Replaces the current draft."
+                label={templateLoading ? "Loading template…" : "Pick a template…"}
+                disabled={templateLoading}
+                items={templates}
+                itemToString={(t) =>
+                  t ? `${t.document_type} (${t.field_count} fields)` : ""
+                }
+                selectedItem={null}
+                onChange={({ selectedItem }) => {
+                  if (selectedItem?.id) handleApplyTemplate(selectedItem.id);
+                }}
+                size="sm"
+                data-testid="def-template-picker"
+              />
+            )}
             <TextInput
               id="def-document-type"
               labelText="Document type"

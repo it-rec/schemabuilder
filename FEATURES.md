@@ -114,3 +114,35 @@ Status: ideas captured 2026-05-11. Shipped on branch
   dedicated CI step diff the live schema against the snapshot and
   fail with a clear "run python export_openapi.py SNAPSHOT" message
   on drift)
+
+Shipped on branch `claude/brainstorm-features-Klzn8`:
+- Definitions Templates / Library (`backend/templates/` ships starter
+  JSONs for invoice, receipt, business card, purchase order, bank
+  statement; `GET /api/templates` / `GET /api/templates/{id}` expose
+  them read-only; create-mode editor gets a "Start from template"
+  dropdown that hydrates the draft via `fetchTemplate`)
+- Per-field normalizer (`normalizer` slot on `FieldSpec`; supports
+  `number`, `currency`, `date[:FORMAT]`, `percent`, `boolean`, `trim`,
+  `lowercase`, `uppercase`; new `backend/normalizers.py` module;
+  Pydantic rejects unknown keywords at upload time; matcher attaches
+  `normalized_value` to every field result and array sub-field result;
+  LLM-fallback values also pass through the normalizer; FE editor
+  exposes the choice as a Dropdown; FieldsPanel renders the parsed
+  value next to the raw text)
+- Field dependencies (`visible_if` / `required_if` on `FieldSpec`;
+  grammar supports `{field, equals|in|present|absent}` plus
+  `{all|any: [...]}` combinators and a bare `true` for "always
+  required"; `backend/dependencies.py` evaluates after the matcher +
+  LLM fallback; suppressed fields have their `extracted_value` wiped
+  and `match_reason: "hidden_by_dependency"`; required-but-missing
+  fields surface `required_satisfied: false`; FE editor lets users
+  type `field=value`, `field in a,b`, `field present`, or raw JSON;
+  FieldsPanel hides suppressed rows and badges missing-required fields
+  with a red `required` tag)
+- Multi-page tables (`multi_page` flag + `header_pattern` regex on
+  array fields; `_match_array_field` filters header rows by regex
+  and, when `multi_page` is on, auto-skips rows whose tokens are a
+  subset of sub-field-name tokens (the column-header repeat on page
+  2+); array-field result includes `pages_spanned: [1,2,...]` and
+  `is_multi_page` so the FE can badge "pages 1–3"; `header_pattern`
+  validated as a compilable regex at upload time)

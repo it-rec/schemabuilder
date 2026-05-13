@@ -102,6 +102,16 @@ const SubFieldRow = React.memo(function SubFieldRow({
       {subField.extracted_value ? (
         <span className="fields-panel__sub-field-value">
           {subField.extracted_value}
+          {subField.normalizer && subField.normalized_value != null && (
+            <span
+              className="fields-panel__normalized"
+              data-testid={`field-normalized-${subField.name}`}
+              title={`Normalized via ${formatNormalizer(subField.normalizer)}`}
+            >
+              {" "}
+              → {formatNormalized(subField.normalized_value)}
+            </span>
+          )}
         </span>
       ) : (
         <span className="fields-panel__sub-field-value fields-panel__sub-field-value--empty">
@@ -111,6 +121,21 @@ const SubFieldRow = React.memo(function SubFieldRow({
     </li>
   );
 });
+
+function formatNormalizer(spec) {
+  if (!spec) return "";
+  if (typeof spec === "string") return spec;
+  if (typeof spec === "object" && spec.name) {
+    return spec.format ? `${spec.name}:${spec.format}` : spec.name;
+  }
+  return String(spec);
+}
+
+function formatNormalized(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return String(value);
+}
 
 const FieldItem = React.memo(function FieldItem({
   field,
@@ -221,9 +246,30 @@ const FieldItem = React.memo(function FieldItem({
               LLM
             </Tag>
           )}
+          {field.required && field.required_satisfied === false && (
+            <Tag
+              size="sm"
+              type="red"
+              title="This field is required by a dependency but no value was found."
+              data-testid={`field-required-missing-${field.name}`}
+            >
+              required
+            </Tag>
+          )}
           {isArray && hasItems && (
             <Tag size="sm" type="blue">
               {field.items.length} item{field.items.length !== 1 ? "s" : ""}
+            </Tag>
+          )}
+          {isArray && Array.isArray(field.pages_spanned) && field.pages_spanned.length > 1 && (
+            <Tag
+              size="sm"
+              type="teal"
+              title={`Items found on pages ${field.pages_spanned.join(", ")}`}
+              data-testid={`field-pages-${field.name}`}
+            >
+              pages {field.pages_spanned[0]}–
+              {field.pages_spanned[field.pages_spanned.length - 1]}
             </Tag>
           )}
         </div>
@@ -233,6 +279,15 @@ const FieldItem = React.memo(function FieldItem({
         {!isArray && hasValue && (
           <div className="fields-panel__field-value">
             <span className="fields-panel__field-value-text">{field.extracted_value}</span>
+            {field.normalizer && field.normalized_value != null && (
+              <span
+                className="fields-panel__normalized"
+                data-testid={`field-normalized-${field.name}`}
+                title={`Normalized via ${formatNormalizer(field.normalizer)}`}
+              >
+                → {formatNormalized(field.normalized_value)}
+              </span>
+            )}
             {field.page && (
               <span className="fields-panel__page-badge">p.{field.page}</span>
             )}
@@ -316,7 +371,18 @@ export default function FieldsPanel({
   highlightedField,
   loading,
 }) {
-  const fields = extraction?.fields;
+  const allFields = extraction?.fields;
+  // Hide fields suppressed by `visible_if`. The backend wipes their
+  // `extracted_value` already; filtering here also drops the empty row
+  // so the panel doesn't display dead space for fields that don't apply
+  // to this document (e.g. "IBAN" on a cash-paid receipt).
+  const fields = useMemo(
+    () =>
+      Array.isArray(allFields)
+        ? allFields.filter((f) => f.is_visible !== false)
+        : allFields,
+    [allFields],
+  );
   const highlightedEntryId = highlightedField?.matched_entry_id ?? null;
   const tableNames = useMemo(
     () => (Array.isArray(extraction?.target_tables) ? extraction.target_tables : []),

@@ -1,0 +1,47 @@
+{
+  "document": {
+    "document_type": "Receipt",
+    "document_description": "A retail or restaurant receipt showing items purchased, taxes, and the total paid.",
+    "fields": [
+      {
+        "name": "merchant_name",
+        "description": "Store, restaurant, or vendor name.",
+        "examples": ["ACME Coffee"]
+      },
+      {
+        "name": "transaction_date",
+        "description": "Date the purchase was made.",
+        "examples": ["2024-08-12"],
+        "normalizer": "date"
+      },
+      {
+        "name": "total",
+        "description": "Final amount paid by the customer.",
+        "examples": ["12.50"],
+        "normalizer": "currency"
+      },
+      {
+        "name": "tax",
+        "description": "Tax amount charged.",
+        "examples": ["1.00"],
+        "normalizer": "currency"
+      },
+      {
+        "name": "payment_method",
+        "description": "How the customer paid.",
+        "examples": ["Visa"],
+        "available_options": ["Cash", "Visa", "Mastercard", "Amex", "Debit", "Apple Pay", "Google Pay"]
+      },
+      {
+        "name": "items",
+        "type": "array",
+        "description": "Individual items purchased.",
+        "fields": [
+          {"name": "description", "description": "Item name.", "examples": ["Coffee"]},
+          {"name": "quantity", "description": "Units purchased.", "examples": ["1"], "normalizer": "number"},
+          {"name": "price", "description": "Line price.", "examples": ["3.50"], "normalizer": "currency"}
+        ]
+      }
+    ]
+  }
+}

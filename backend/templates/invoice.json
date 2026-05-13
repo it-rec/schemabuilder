@@ -1,0 +1,59 @@
+{
+  "document": {
+    "document_type": "Invoice",
+    "document_description": "An invoice issued by a seller to a buyer outlining products or services, quantities, prices, and payment terms.",
+    "fields": [
+      {
+        "name": "invoice_number",
+        "description": "Unique identifier or reference number for this invoice.",
+        "examples": ["INV-2024-001", "2024-01-45234"],
+        "pattern": "(?:INV[- ]?)?[A-Z]?\\d{4,}[-\\d]*"
+      },
+      {
+        "name": "invoice_date",
+        "description": "The invoice creation or issue date.",
+        "examples": ["2024-02-04"],
+        "normalizer": "date"
+      },
+      {
+        "name": "due_date",
+        "description": "Date by which payment is expected.",
+        "examples": ["2024-03-04"],
+        "normalizer": "date"
+      },
+      {
+        "name": "total_amount",
+        "description": "The total amount due on the invoice.",
+        "examples": ["1234.56", "$1,234.56"],
+        "normalizer": "currency"
+      },
+      {
+        "name": "currency",
+        "description": "Currency used in the invoice.",
+        "examples": ["USD", "EUR"],
+        "available_options": ["USD", "EUR", "GBP", "CHF", "JPY", "CAD", "AUD"]
+      },
+      {
+        "name": "customer_name",
+        "description": "Full name of the person or company being billed.",
+        "examples": ["Acme Corp"]
+      },
+      {
+        "name": "vendor_name",
+        "description": "Name of the company that issued the invoice.",
+        "examples": ["Supplier GmbH"]
+      },
+      {
+        "name": "line_items",
+        "type": "array",
+        "description": "Each product or service line on the invoice.",
+        "fields": [
+          {"name": "description", "description": "What is being billed.", "examples": ["Consulting hours"]},
+          {"name": "quantity", "description": "Number of units.", "examples": ["2"], "normalizer": "number"},
+          {"name": "unit_price", "description": "Price per unit.", "examples": ["500.00"], "normalizer": "currency"},
+          {"name": "amount", "description": "Line total.", "examples": ["1000.00"], "normalizer": "currency"}
+        ]
+      }
+    ]
+  }
+}

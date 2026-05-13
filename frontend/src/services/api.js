@@ -263,6 +263,25 @@ export async function fetchDefinitionVersion(defId, versionId, { signal } = {}) 
   return res.json();
 }
 
+// Built-in starter templates. Returned as the same envelope as definitions —
+// the editor lists them in a dropdown, and selecting one calls
+// `fetchTemplate` to hydrate the full JSON for editing.
+export async function fetchTemplates({ signal } = {}) {
+  const res = await request("/api/templates", {
+    signal,
+    errorFallback: "Failed to fetch templates",
+  });
+  return unwrapList(await res.json());
+}
+
+export async function fetchTemplate(templateId, { signal } = {}) {
+  const res = await request(`/api/templates/${encodeURIComponent(templateId)}`, {
+    signal,
+    errorFallback: "Failed to fetch template",
+  });
+  return res.json();
+}
+
 export async function deleteDefinition(defId, { signal } = {}) {
   const res = await request(`/api/definitions/${defId}`, {
     method: "DELETE",

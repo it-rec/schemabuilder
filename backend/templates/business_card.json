@@ -1,0 +1,48 @@
+{
+  "document": {
+    "document_type": "Business Card",
+    "document_description": "A business card listing a person's name, role, contact details, and company information.",
+    "fields": [
+      {
+        "name": "full_name",
+        "description": "The person's full name as printed.",
+        "examples": ["Jane Doe"]
+      },
+      {
+        "name": "job_title",
+        "description": "Job title or role.",
+        "examples": ["Senior Software Engineer"]
+      },
+      {
+        "name": "company",
+        "description": "Company or organisation name.",
+        "examples": ["Acme Corp"]
+      },
+      {
+        "name": "email",
+        "description": "Email address.",
+        "examples": ["jane.doe@example.com"],
+        "pattern": "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}",
+        "normalizer": "lowercase"
+      },
+      {
+        "name": "phone",
+        "description": "Phone number, any format.",
+        "examples": ["+1 555 123 4567"],
+        "pattern": "(?:\\+?\\d[\\d \\-]{7,}\\d)"
+      },
+      {
+        "name": "website",
+        "description": "URL on the card.",
+        "examples": ["https://example.com"],
+        "pattern": "https?://[^\\s]+",
+        "normalizer": "lowercase"
+      },
+      {
+        "name": "address",
+        "description": "Postal address.",
+        "examples": ["1 Infinite Loop, Cupertino, CA"]
+      }
+    ]
+  }
+}

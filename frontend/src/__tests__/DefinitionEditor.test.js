@@ -14,6 +14,13 @@ beforeEach(() => {
   api.uploadDefinition.mockReset();
   api.updateDefinition.mockReset();
   api.deleteDefinition.mockReset();
+  // `fetchTemplates` is fired by the create-mode template picker effect; if
+  // it stays the auto-mock (returns undefined) the .then() in the effect
+  // throws synchronously and pollutes every create-mode test. Default to
+  // an empty list so the picker just doesn't render.
+  api.fetchTemplates.mockReset();
+  api.fetchTemplates.mockResolvedValue([]);
+  api.fetchTemplate.mockReset();
 });
 
 afterEach(() => {
@@ -274,4 +281,113 @@ test("edit flow: cancelling the confirm dialog skips deletion", async () => {
   await screen.findByDisplayValue("Invoice");
   await user.click(screen.getByRole("button", { name: /danger Delete/i }));
   expect(api.deleteDefinition).not.toHaveBeenCalled();
+});
+
+test("create flow: template picker hydrates draft from the chosen template", async () => {
+  const user = userEvent.setup();
+  api.fetchTemplates.mockResolvedValue([
+    { id: "invoice", document_type: "Invoice", field_count: 2 },
+  ]);
+  api.fetchTemplate.mockResolvedValue({
+    id: "invoice",
+    document: {
+      document_type: "Invoice",
+      document_description: "starter",
+      fields: [{ name: "invoice_number" }, { name: "total" }],
+    },
+  });
+
+  render(
+    <DefinitionEditor
+      open
+      mode="create"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  // Picker shows up after fetchTemplates resolves. Carbon Dropdown
+  // renders multiple "Start from template" nodes (label + listbox
+  // attrs) — use the combobox role to disambiguate.
+  await screen.findByText("Start from template (optional)");
+  const picker = screen.getByRole("combobox", { name: /template/i });
+  await user.click(picker);
+  await user.click(await screen.findByText(/Invoice \(2 fields\)/));
+
+  await waitFor(() =>
+    expect(api.fetchTemplate).toHaveBeenCalledWith("invoice"),
+  );
+  // Document type field is now hydrated from the template.
+  expect(await screen.findByDisplayValue("Invoice")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("invoice_number")).toBeInTheDocument();
+});
+
+test("edit flow: round-trips normalizer keyword on save", async () => {
+  const user = userEvent.setup();
+  api.fetchDefinition.mockResolvedValue({
+    document: {
+      document_type: "Doc",
+      fields: [{ name: "total", normalizer: "currency" }],
+    },
+  });
+  api.updateDefinition.mockResolvedValue({ id: "doc" });
+
+  render(
+    <DefinitionEditor
+      open
+      mode="edit"
+      definitionId="doc"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  // Hydrated normalizer dropdown shows the keyword label.
+  await screen.findByDisplayValue("total");
+  await user.click(screen.getByRole("button", { name: /Save changes/i }));
+
+  await waitFor(() => expect(api.updateDefinition).toHaveBeenCalledTimes(1));
+  const [, payload] = api.updateDefinition.mock.calls[0];
+  expect(payload.document.fields[0].normalizer).toBe("currency");
+});
+
+test("edit flow: parses visible_if 'field=value' into a condition object", async () => {
+  const user = userEvent.setup();
+  api.fetchDefinition.mockResolvedValue({
+    document: {
+      document_type: "Doc",
+      fields: [
+        { name: "method" },
+        { name: "iban", visible_if: { field: "method", equals: "card" } },
+      ],
+    },
+  });
+  api.updateDefinition.mockResolvedValue({ id: "doc" });
+
+  render(
+    <DefinitionEditor
+      open
+      mode="edit"
+      definitionId="doc"
+      onClose={() => {}}
+      onSaved={() => {}}
+      onDeleted={() => {}}
+    />,
+  );
+
+  // The condition is hydrated back into the "field=value" short form.
+  const inputs = await screen.findAllByLabelText(/Visible if/i);
+  // Two fields → two visible_if inputs; the iban one carries the value.
+  const hydrated = inputs.find((el) => el.value === "method=card");
+  expect(hydrated).toBeDefined();
+
+  await user.click(screen.getByRole("button", { name: /Save changes/i }));
+  await waitFor(() => expect(api.updateDefinition).toHaveBeenCalledTimes(1));
+  const [, payload] = api.updateDefinition.mock.calls[0];
+  expect(payload.document.fields[1].visible_if).toEqual({
+    field: "method",
+    equals: "card",
+  });
 });
