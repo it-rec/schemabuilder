@@ -494,6 +494,30 @@ def test_extract_text_docx_falls_back_when_converted_file_missing(
     assert [e["text"] for e in entries] == ["text-only"]
 
 
+def test_extract_text_docx_falls_back_when_conversion_raises(
+    monkeypatch, tmp_path
+):
+    """_convert_to_pdf imports pythoncom/win32com lazily, so on non-Windows
+    hosts it raises ModuleNotFoundError before it can return None. The
+    fallback must still kick in — otherwise every DOCX/PPTX extraction on
+    a Linux server fails with extraction_error and the UI shows a banner."""
+    src = tmp_path / "linux-host.docx"
+    src.write_bytes(b"PK")
+
+    def _raises(_p):
+        raise ModuleNotFoundError("No module named 'pythoncom'")
+
+    monkeypatch.setattr(main, "_convert_to_pdf", _raises)
+
+    fake = _FakeConverter(_FakeDoclingDoc([_TextItem("text-only")], {}))
+    monkeypatch.setitem(main._text_converters, False, fake)
+    monkeypatch.setattr(main, "_resolve_ocr_decision", lambda _p: False)
+
+    entries, _ = main._extract_text(src)
+    assert [e["text"] for e in entries] == ["text-only"]
+    assert entries[0]["bbox"] is None
+
+
 # ── _get_or_extract_text ────────────────────────────────────────────────
 
 
