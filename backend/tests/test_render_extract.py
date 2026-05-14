@@ -138,6 +138,23 @@ def test_open_pdf_metadata_returns_empty_when_converted_file_missing(
     assert n == 0
 
 
+def test_open_pdf_metadata_returns_empty_when_conversion_raises(monkeypatch, tmp_path):
+    """A converter failure (no LibreOffice on PATH, soffice timeout, COM error)
+    must degrade to empty metadata, not bubble a 500 out of the render path."""
+    _install_fake_pdfium(monkeypatch, _FakePdfDocument([]))
+
+    def _boom(_p):
+        raise RuntimeError("LibreOffice not found.")
+
+    monkeypatch.setattr(main, "_convert_to_pdf", _boom)
+    f = tmp_path / "no-converter.docx"
+    f.write_bytes(b"PK")
+    pdf_path, n, dims = main._open_pdf_metadata(f)
+    assert pdf_path is None
+    assert n == 0
+    assert dims == {}
+
+
 # ── _render_single_page ─────────────────────────────────────────────────
 
 

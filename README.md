@@ -10,7 +10,11 @@ A full-stack web application for viewing and analyzing documents (PDF, DOCX, PPT
 
 - Python 3.11+ (3.14 supported; see `backend/requirements.txt`)
 - Node.js with npm
-- **Windows only:** Microsoft Word and PowerPoint must be installed for DOCX/PPTX rendering. The backend converts those formats to PDF via Office COM automation (`pywin32`) before rasterizing with `pypdfium2`. PDF-only workflows have no Office dependency.
+- **DOCX/PPTX rendering** requires a converter — the backend turns those formats into PDF before rasterizing with `pypdfium2`, and picks the converter by platform:
+  - **Windows:** Microsoft Word and PowerPoint must be installed; conversion goes through Office COM automation (`pywin32`).
+  - **Linux/macOS:** LibreOffice must be installed with `soffice` on `PATH` (e.g. `apt install libreoffice-writer libreoffice-impress`); conversion runs `soffice --headless --convert-to pdf`.
+
+  PDF-only workflows need neither — there is no Office or LibreOffice dependency for PDFs.
 
 ## Getting Started
 

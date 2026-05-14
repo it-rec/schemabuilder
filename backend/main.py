@@ -701,7 +701,18 @@ def _open_pdf_metadata_and_render(
 
     pdf_path = filepath
     if filepath.suffix.lower() in (".docx", ".pptx"):
-        pdf_path = _convert_to_pdf(filepath)
+        # Conversion can fail for environmental reasons (no Office on Windows,
+        # no LibreOffice on PATH, a timeout). Treat a failure like a missing
+        # PDF — the caller already degrades gracefully on a None pdf_path —
+        # instead of 500ing the render request.
+        try:
+            pdf_path = _convert_to_pdf(filepath)
+        except Exception:
+            logger.exception(
+                "DOCX/PPTX→PDF conversion failed for %s; skipping render",
+                filepath.name,
+            )
+            pdf_path = None
 
     if not pdf_path or not pdf_path.exists():
         return None, 0, {}, {}
