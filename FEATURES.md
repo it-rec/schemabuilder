@@ -175,3 +175,13 @@ Shipped on branch `claude/brainstorm-new-features-Yx922`:
   `attachment` with the right `Content-Disposition`; editor footer
   gains an "Export schema" overflow menu with one item per format,
   triggering a blob download)
+
+Shipped on branch `claude/fix-currency-extraction-CrGn0`:
+- Currency value extraction fix — currency fields used to return the
+  whole sentence the amount was found in ("Total due: €1.234,56" instead
+  of "€1.234,56"). `_match_field_to_entries` now narrows `extracted_value`
+  down to just the money substring (`_CURRENCY_VALUE_RE` matches a
+  sign-prefixed, sign-suffixed, or sign-less decimal amount) whenever the
+  field carries a `currency` normalizer or the `currency_sign` heuristic
+  was the winning signal; falls back to the full text when no
+  money-shaped substring is detectable.

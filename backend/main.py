@@ -1698,6 +1698,19 @@ _DECIMAL_LOOSE_DETECT_RE = re.compile(r'\d+\.\d+')
 _INT_WORD_RE = re.compile(r'\b\d+\b')
 _CURRENCY_SIGN_RE = re.compile(r'[\$€£¥]')
 _CURRENCY_SIGNS = ('$', '€', '£', '¥')
+# Capture the money substring inside a wider entry so `extracted_value`
+# returns "€1.234,56" rather than the whole surrounding sentence. Handles:
+#   - sign before the amount:  "€1,234.56", "$ 42.00"
+#   - sign after the amount:   "1.234,56 €", "42$"
+#   - sign-less decimal money: "999.99", "1234.56", "1.234,56", "1,234.56"
+# The sign-less branch requires a two-digit fractional part so it doesn't
+# swallow bare integers or version-like "4.2.1"; the integer part accepts
+# either grouped thousands ("1.234"/"1,234") or a plain run of digits.
+_CURRENCY_VALUE_RE = re.compile(
+    r"[\$€£¥]\s*-?\d(?:[\d.,]*\d)?"
+    r"|-?\d(?:[\d.,]*\d)?\s*[\$€£¥]"
+    r"|-?(?:\d{1,3}(?:[.,]\d{3})+|\d+)[.,]\d{2}(?!\d)"
+)
 
 
 def _build_field_signatures(definition: dict) -> list:
@@ -1784,6 +1797,32 @@ def _entry_could_match(entry: dict, signatures: list) -> bool:
             if pat.search(text):
                 return True
     return False
+
+
+def _is_currency_field(field: dict, reason: Optional[str]) -> bool:
+    """True when the field should be treated as money for value extraction.
+
+    Either the winning signal was the currency-sign heuristic, or the field
+    carries a ``currency`` normalizer — both mean the user expects the money
+    value, not the sentence wrapping it.
+    """
+    if reason == "currency_sign":
+        return True
+    spec = _parse_normalizer_spec(field.get("normalizer"))
+    return spec is not None and spec[0] == "currency"
+
+
+def _narrow_currency_value(text: str) -> str:
+    """Trim a matched entry down to just its money substring.
+
+    "Total due: €1,234.56" -> "€1,234.56". Returns the input unchanged when
+    no currency-shaped substring is found, so a field that matched on some
+    other signal still gets a sensible value.
+    """
+    m = _CURRENCY_VALUE_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    return text
 
 
 def _compile_field_matchers(field: dict) -> dict:
@@ -2046,6 +2085,10 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         # return the full entry text — that's been the contract since day one.
         if best_reason == "pattern_match" and best_pattern_substring is not None:
             result["extracted_value"] = best_pattern_substring
+        elif _is_currency_field(field, best_reason):
+            # Currency fields return just the money substring, not the
+            # whole sentence the matcher found it in.
+            result["extracted_value"] = _narrow_currency_value(best_match["text"])
         else:
             result["extracted_value"] = best_match["text"]
         result["confidence"] = best_score / 100.0
