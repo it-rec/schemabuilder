@@ -10,6 +10,7 @@ contract changes (e.g. docling renames an attribute we read), the tests fail.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 import threading
 import time
@@ -1353,7 +1354,9 @@ def test_format_import_error_walks_cause_chain():
 
 
 def _install_fake_win32(monkeypatch, app_call_log: list):
-    """Inject minimal fake pythoncom + win32com.client modules."""
+    """Inject minimal fake pythoncom + win32com.client modules and force the
+    Windows backend (`_convert_to_pdf` dispatches on `sys.platform`)."""
+    monkeypatch.setattr(main.sys, "platform", "win32")
 
     class _WordDoc:
         def __init__(self, log):
@@ -1535,8 +1538,9 @@ def test_convert_to_pdf_unsupported_extension_returns_none(monkeypatch, tmp_path
     src.write_bytes(b"...")
     result = main._convert_to_pdf(src)
     assert result is None
-    # Still calls CoInitialize and CoUninitialize.
-    assert ("co-uninit",) in log
+    # The extension is rejected up front — no conversion backend is spun up
+    # (no COM init, no Office dispatch) for a file we'd never convert.
+    assert log == []
 
 
 def test_convert_to_pdf_caches_result(monkeypatch, tmp_path):
@@ -1601,6 +1605,82 @@ def test_convert_to_pdf_distinct_stems_per_extension(monkeypatch, tmp_path):
     b = main._convert_to_pdf(pptx)
     assert a != b
     assert a.exists() and b.exists()
+
+
+# ── _convert_to_pdf (LibreOffice headless fake — non-Windows backend) ────
+
+
+def _install_fake_soffice(monkeypatch, call_log: list, *, exit_code=0, produce=True):
+    """Force the LibreOffice backend and stub the `soffice` subprocess.
+
+    The fake records each argv it's handed and (when `produce`) writes the
+    `<stem>.pdf` LibreOffice would have emitted into `--outdir`, so the real
+    move-into-place + caching logic in `_convert_to_pdf` still runs.
+    """
+    monkeypatch.setattr(main.sys, "platform", "linux")
+    monkeypatch.setattr(main.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def _fake_run(cmd, **kwargs):
+        call_log.append(cmd)
+        outdir = Path(cmd[cmd.index("--outdir") + 1])
+        src = Path(cmd[-1])
+        if produce and exit_code == 0:
+            (outdir / f"{src.stem}.pdf").write_bytes(b"%PDF-fake\n%%EOF\n")
+        return subprocess.CompletedProcess(cmd, exit_code, stdout="", stderr="boom")
+
+    monkeypatch.setattr(main.subprocess, "run", _fake_run)
+
+
+def test_convert_to_pdf_libreoffice_converts_docx(monkeypatch, tmp_path):
+    """On non-Windows, _convert_to_pdf shells out to headless LibreOffice and
+    moves the produced PDF to the extension-encoded cache path."""
+    main._pdf_conversion_cache.clear()
+    monkeypatch.setattr(main, "_pdf_temp_dir", str(tmp_path))
+    calls: list = []
+    _install_fake_soffice(monkeypatch, calls)
+    src = tmp_path / "report.docx"
+    src.write_bytes(b"PK")
+
+    pdf = main._convert_to_pdf(src)
+
+    assert pdf is not None and pdf.exists()
+    # Extension is mixed into the converted name (collision-proofing).
+    assert pdf.name == "report.docx.pdf"
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[0] == "/usr/bin/soffice"
+    assert "--headless" in argv
+    assert argv[argv.index("--convert-to") + 1] == "pdf"
+    # Source file is passed last; conversion is non-interactive.
+    assert argv[-1] == str(src.resolve())
+
+
+def test_convert_to_pdf_libreoffice_missing_binary_raises(monkeypatch, tmp_path):
+    """No soffice/libreoffice on PATH → a clear RuntimeError, not a confusing
+    FileNotFoundError from subprocess."""
+    main._pdf_conversion_cache.clear()
+    monkeypatch.setattr(main, "_pdf_temp_dir", str(tmp_path))
+    monkeypatch.setattr(main.sys, "platform", "linux")
+    monkeypatch.setattr(main.shutil, "which", lambda _name: None)
+    src = tmp_path / "report.docx"
+    src.write_bytes(b"PK")
+
+    with pytest.raises(RuntimeError, match="LibreOffice not found"):
+        main._convert_to_pdf(src)
+
+
+def test_convert_to_pdf_libreoffice_failed_conversion_raises(monkeypatch, tmp_path):
+    """soffice exits non-zero (or emits nothing) → RuntimeError carrying the
+    captured output, so the extraction fallback path can log something useful."""
+    main._pdf_conversion_cache.clear()
+    monkeypatch.setattr(main, "_pdf_temp_dir", str(tmp_path))
+    calls: list = []
+    _install_fake_soffice(monkeypatch, calls, exit_code=1, produce=False)
+    src = tmp_path / "report.docx"
+    src.write_bytes(b"PK")
+
+    with pytest.raises(RuntimeError, match="LibreOffice conversion"):
+        main._convert_to_pdf(src)
 
 
 # ── _find_file caching + stale entry removal ────────────────────────────
