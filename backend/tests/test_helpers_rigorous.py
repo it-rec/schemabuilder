@@ -434,6 +434,157 @@ def test_entry_could_match_returns_false_when_no_signature_fires():
     )
 
 
+# ── _build_combined_signatures / _entry_could_match_combined ─────────────
+#
+# The combined form is purely a speed optimization of the per-signature
+# loop: it MUST accept exactly the same set of entries. These tests pin
+# that equivalence directly rather than trusting it.
+
+
+def _could_match_loop(entry, sigs):
+    """Reference: the pre-combination per-signature behavior."""
+    return main._entry_could_match(entry, sigs)
+
+
+def _could_match_combined(entry, sigs):
+    return main._entry_could_match_combined(entry, main._build_combined_signatures(sigs))
+
+
+# A spread of definition shapes that exercises every signature kind.
+_EQUIVALENCE_DEFS = [
+    _defn([{"name": "invoice_date", "examples": ["2024-02-04"]}]),
+    _defn([{"name": "invoice_id", "examples": ["INV-001", "INV-002"]}]),
+    _defn([{"name": "amount", "examples": ["1.00"], "normalizer": "currency"}]),
+    _defn([{"name": "qty", "examples": ["42"]}]),
+    _defn([{"name": "sym", "examples": ["$"]}]),
+    _defn([{"name": "currency", "available_options": ["USD", "EUR", "GBP"]}]),
+    _defn([{"name": "iban", "pattern": r"\b[A-Z]{2}\d{20}\b"}]),
+    _defn([{"name": "weird", "examples": ["a.b*c?", "(x|y)"]}]),  # regex-special literals
+    _defn([
+        {"name": "invoice_date", "examples": ["2024-02-04"]},
+        {"name": "invoice_id", "examples": ["INV-001"]},
+        {"name": "total", "examples": ["$"], "pattern": r"TOTAL:\s*([\d.]+)"},
+        {"name": "status", "available_options": ["Paid", "Unpaid"]},
+        {"name": "line_items", "type": "array",
+         "fields": [{"name": "sku", "examples": ["ABC-9"]}]},
+    ]),
+]
+
+_EQUIVALENCE_TEXTS = [
+    "Invoice issued on 2024-02-04 to the customer",
+    "Reference INV-001 — please remit promptly",
+    "TOTAL: 1234.56 due now",
+    "Paid in full, thank you",
+    "Quantity 42 units of product",
+    "Amount: $99.00",
+    "see a.b*c? and (x|y) verbatim",
+    "USDX is not a currency option",
+    "wholly unrelated boilerplate paragraph text",
+    "MIXED Case Invoice ID inv-001 here",
+    "",
+    "ABC-9",
+]
+
+
+@pytest.mark.parametrize("definition", _EQUIVALENCE_DEFS)
+def test_combined_signatures_match_the_loop(definition):
+    sigs = main._build_field_signatures(definition)
+    for text in _EQUIVALENCE_TEXTS:
+        for etype in ("TextItem", "SectionHeaderItem"):
+            entry = {"type": etype, "text": text, "_text_lower": text.lower()}
+            assert _could_match_loop(entry, sigs) == _could_match_combined(entry, sigs), (
+                f"mismatch for {etype!r} text={text!r}"
+            )
+
+
+def test_combined_signatures_tableitem_always_passes():
+    sigs = main._build_field_signatures(_EQUIVALENCE_DEFS[0])
+    combined = main._build_combined_signatures(sigs)
+    assert main._entry_could_match_combined({"type": "TableItem", "text": ""}, combined)
+
+
+def test_combined_signatures_no_signatures_passes_all():
+    combined = main._build_combined_signatures([])
+    assert combined == (None, None, [])
+    assert main._entry_could_match_combined(
+        {"type": "TextItem", "text": "anything at all"}, combined
+    )
+
+
+def test_combined_signatures_computes_text_lower_when_uncached():
+    """Entries off non-cached paths lack _text_lower; the helper must lower()."""
+    sigs = [("literal", "foo")]
+    combined = main._build_combined_signatures(sigs)
+    assert main._entry_could_match_combined({"type": "TextItem", "text": "FOO"}, combined)
+
+
+def test_combined_signatures_user_pattern_with_global_flag_falls_back():
+    """A user regex carrying a global inline flag can't be nested into the
+    alternation. It must land in regex_fallback (not be dropped), so the
+    entry still matches."""
+    sigs = main._build_field_signatures(
+        _defn([{"name": "f", "pattern": r"(?i)urgent"}])
+    )
+    combined_literal, combined_regex, regex_fallback = main._build_combined_signatures(sigs)
+    # The user pattern couldn't be folded into combined_regex — it lands in
+    # the fallback list rather than being dropped.
+    assert any(p.pattern == r"(?i)urgent" for p in regex_fallback)
+    # ...but it's still honored via the fallback loop.
+    entry = {"type": "TextItem", "text": "This is URGENT", "_text_lower": "this is urgent"}
+    combined = (combined_literal, combined_regex, regex_fallback)
+    assert main._entry_could_match_combined(entry, combined)
+    assert main._entry_could_match(entry, sigs) == main._entry_could_match_combined(
+        entry, combined
+    )
+
+
+def test_combined_signatures_unexpected_flag_kept_in_fallback():
+    """A signature regex with a flag the combiner can't reproduce per-branch
+    (DOTALL here) is looped individually instead of being folded in."""
+    sigs = [("regex", re.compile(r"a.b", re.DOTALL))]
+    _, combined_regex, regex_fallback = main._build_combined_signatures(sigs)
+    assert combined_regex is None
+    assert len(regex_fallback) == 1
+    # DOTALL semantics survive: '.' matches the newline.
+    entry = {"type": "TextItem", "text": "a\nb"}
+    assert main._entry_could_match_combined(
+        entry, (None, combined_regex, regex_fallback)
+    )
+
+
+def test_combined_signatures_dedupes_repeated_signatures():
+    """Many fields sharing the same example shape produce duplicate
+    signatures; the combiner collapses them."""
+    definition = _defn([
+        {"name": f"date_{i}", "examples": ["2024-01-01"]} for i in range(5)
+    ])
+    sigs = main._build_field_signatures(definition)
+    combined_literal, combined_regex, regex_fallback = main._build_combined_signatures(sigs)
+    # 5 distinct literals (one label each) + 1 shared example literal; the
+    # shared date regex collapses to a single alternation branch.
+    assert combined_regex.pattern.count("|") == 0  # one regex branch, no alternation
+
+
+# ── _get_combined_signatures_for caching ────────────────────────────────
+
+
+def test_get_combined_signatures_for_caches_by_def_id_and_signature():
+    main._signature_cache.clear()
+    main._combined_signature_cache.clear()
+    definition = _defn([{"name": "x", "examples": ["A"]}])
+    main._definitions_signature = ("v1",)
+    first = main._get_combined_signatures_for("d1", definition)
+    second = main._get_combined_signatures_for("d1", definition)
+    assert first is second  # exact-same tuple from cache
+
+    main._definitions_signature = ("v2",)
+    third = main._get_combined_signatures_for("d1", definition)
+    assert third is not first
+    main._signature_cache.clear()
+    main._combined_signature_cache.clear()
+    main._definitions_signature = None
+
+
 # ── _match_field_to_entries: every scoring branch ───────────────────────
 
 
@@ -824,10 +975,12 @@ def test_load_definitions_caches_until_invalidated(monkeypatch, tmp_path):
 def test_invalidate_definitions_clears_signature_cache():
     """A signature cache outliving a definitions update would return stale
     pre-filter signatures for an updated definition. Pin the invalidation
-    behavior."""
+    behavior — both the raw and the combined caches must clear together."""
     main._signature_cache[("d1", ("sig",))] = ["dummy"]
+    main._combined_signature_cache[("d1", ("sig",))] = (None, None, [])
     main._invalidate_definitions_cache()
     assert main._signature_cache == {}
+    assert main._combined_signature_cache == {}
 
 
 # ── _get_document_id ────────────────────────────────────────────────────

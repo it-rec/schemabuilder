@@ -443,6 +443,11 @@ _doc_listing_lock = threading.Lock()
 # mtimes can't accumulate unbounded compiled-signature lists.
 _SIGNATURE_CACHE_MAX = int(os.getenv("SCHEMABUILDER_SIGNATURE_CACHE_MAX") or 256)
 _signature_cache: "OrderedDict" = OrderedDict()
+# Same key as _signature_cache, but the value is the collapsed pre-filter form
+# (see _build_combined_signatures): two alternation regexes instead of a list
+# the entry loop has to walk signature-by-signature. Cleared in lockstep with
+# _signature_cache so a definitions reload can't leave a stale combined form.
+_combined_signature_cache: "OrderedDict" = OrderedDict()
 
 # Module-level Docling converters keyed by do_ocr. Construction loads
 # layout/OCR models which is slow; reuse instances across documents. The
@@ -1664,6 +1669,7 @@ def _load_definitions() -> dict:
         _definitions_signature = sig
         # Stale signature entries are harmless; clear to bound memory.
         _signature_cache.clear()
+        _combined_signature_cache.clear()
         # Return the local `defs`: another thread could call
         # _invalidate_definitions_cache between releasing this lock and the
         # return, which would null the global and surface None to the caller.
@@ -1677,6 +1683,7 @@ def _invalidate_definitions_cache_locked() -> None:
     _definitions_cache = None
     _definitions_signature = None
     _signature_cache.clear()
+    _combined_signature_cache.clear()
 
 
 def _invalidate_definitions_cache() -> None:
@@ -1796,6 +1803,137 @@ def _entry_could_match(entry: dict, signatures: list) -> bool:
         else:
             if pat.search(text):
                 return True
+    return False
+
+
+# Flags a signature regex may carry and still be safe to fold into the big
+# combined alternation. UNICODE is the str-pattern default; IGNORECASE is
+# reproduced per-branch with a scoped `(?i:...)` group. Anything else
+# (DOTALL, MULTILINE, ASCII, VERBOSE, ...) changes matching semantics in a
+# way a scoped group can't always express, so such a signature is kept out
+# of the alternation and looped individually instead.
+_COMBINABLE_FLAG_MASK = re.UNICODE | re.IGNORECASE
+
+
+def _build_combined_signatures(signatures: list) -> tuple:
+    """Collapse a raw signature list into the pre-filter's fast form.
+
+    `_entry_could_match` walks the signature list per entry, which is
+    `O(entries * signatures)` of Python-level loop overhead. This folds the
+    same signatures into at most two compiled alternations so the hot loop
+    does one C-level `.search()` per side instead.
+
+    Returns ``(combined_literal, combined_regex, regex_fallback)``:
+
+      * ``combined_literal`` — ``re.Pattern | None``. Alternation of every
+        literal signature, **no flags**, meant to be searched against an
+        entry's *lowercased* text. Because the literals are already
+        lowercased (by `_build_field_signatures`) this is byte-for-byte the
+        same test as the old ``literal in text_lower`` — no regex
+        case-folding is involved, so Unicode `str.lower()` semantics are
+        preserved exactly.
+      * ``combined_regex`` — ``re.Pattern | None``. Alternation of every
+        regex signature that was safe to fold in, each branch carrying its
+        original IGNORECASE via a scoped ``(?i:...)`` group, searched
+        against the entry's raw text.
+      * ``regex_fallback`` — ``list`` of regex Patterns that could *not* be
+        folded in (an unexpected flag, or a pattern whose source can't be
+        nested — e.g. a user regex with a global inline flag). Callers loop
+        these individually. Nothing is ever dropped: every regex signature
+        ends up either in ``combined_regex`` or in ``regex_fallback``.
+
+    An all-``None`` / empty result means "no signatures" — callers treat
+    that the same as the old ``if not signatures: return True``.
+    """
+    literal_parts: list[str] = []
+    regex_parts: list[str] = []
+    folded_regex_pats: list = []
+    regex_fallback: list = []
+    seen_literal: set = set()
+    seen_regex: set = set()
+
+    for kind, pat in signatures:
+        if kind == "literal":
+            if not pat or pat in seen_literal:
+                continue
+            seen_literal.add(pat)
+            literal_parts.append(re.escape(pat))
+            continue
+        # regex signature
+        if pat.flags & ~_COMBINABLE_FLAG_MASK:
+            regex_fallback.append(pat)
+            continue
+        key = (pat.pattern, bool(pat.flags & re.IGNORECASE))
+        if key in seen_regex:
+            continue
+        seen_regex.add(key)
+        if pat.flags & re.IGNORECASE:
+            regex_parts.append(f"(?i:(?:{pat.pattern}))")
+        else:
+            regex_parts.append(f"(?:{pat.pattern})")
+        folded_regex_pats.append(pat)
+
+    combined_literal = re.compile("|".join(literal_parts)) if literal_parts else None
+
+    combined_regex = None
+    if regex_parts:
+        try:
+            combined_regex = re.compile("|".join(regex_parts))
+        except re.error:
+            # A folded pattern's source can't be nested (e.g. a user regex
+            # carrying a global inline flag). Fall back to looping every
+            # would-be-folded pattern individually — still correct, just
+            # not collapsed.
+            combined_regex = None
+            regex_fallback = regex_fallback + folded_regex_pats
+
+    return combined_literal, combined_regex, regex_fallback
+
+
+def _get_combined_signatures_for(def_id: str, definition: dict) -> tuple:
+    """Cache the combined pre-filter form by (def_id, signature).
+
+    Keyed identically to `_signature_cache` and cleared in lockstep with it.
+    Goes through `_get_signatures_for` so the raw-signature cache stays warm
+    too (other call sites and tests still rely on it)."""
+    sig = _definitions_signature
+    key = (def_id, sig)
+    cached = _combined_signature_cache.get(key)
+    if cached is not None:
+        return cached
+    raw = _get_signatures_for(def_id, definition)
+    built = _build_combined_signatures(raw)
+    _lru_set(_combined_signature_cache, key, built, _SIGNATURE_CACHE_MAX)
+    return built
+
+
+def _entry_could_match_combined(entry: dict, combined: tuple) -> bool:
+    """`_entry_could_match` against the collapsed form from `_build_combined_signatures`.
+
+    Behaviourally identical to the signature-list version — same TableItem
+    short-circuit, same "no signatures → everything passes" rule, same
+    literal-vs-raw-text matching — just without the per-signature Python loop.
+    """
+    if entry.get("type") == "TableItem":
+        return True
+    combined_literal, combined_regex, regex_fallback = combined
+    if combined_literal is None and combined_regex is None and not regex_fallback:
+        # No signatures at all — mirror `_entry_could_match`'s `if not
+        # signatures: return True`.
+        return True
+
+    text = entry.get("text", "")
+    if combined_literal is not None:
+        text_lower = entry.get("_text_lower")
+        if text_lower is None:
+            text_lower = text.lower()
+        if combined_literal.search(text_lower):
+            return True
+    if combined_regex is not None and combined_regex.search(text):
+        return True
+    for pat in regex_fallback:
+        if pat.search(text):
+            return True
     return False
 
 
@@ -2257,10 +2395,10 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
     doc = definition.get("document", {})
     fields = doc.get("fields", [])
 
-    signatures = (
-        _get_signatures_for(def_id, definition)
+    combined = (
+        _get_combined_signatures_for(def_id, definition)
         if def_id is not None
-        else _build_field_signatures(definition)
+        else _build_combined_signatures(_build_field_signatures(definition))
     )
 
     candidates = []
@@ -2272,7 +2410,7 @@ def _extract_fields(definition: dict, text_entries: list, def_id: Optional[str] 
             text = e.get("text", "")
             e["_text_lower"] = text.lower()
             e["_text_stripped_lower"] = text.strip().lower()
-        if _entry_could_match(e, signatures):
+        if _entry_could_match_combined(e, combined):
             candidates.append(e)
 
     used_ids: set = set()
