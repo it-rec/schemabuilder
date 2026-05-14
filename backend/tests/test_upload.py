@@ -147,7 +147,11 @@ def test_upload_kicks_background_prefetch(client, monkeypatch):
     assert kicked_path == main.TEST_DOCS_DIR / "warm.pdf"
 
 
-def test_upload_accepts_docx_and_pptx_extensions(client):
+def test_upload_accepts_docx_and_pptx_extensions(client, monkeypatch):
+    # The background prefetch would otherwise shell out to LibreOffice (or MS
+    # Office) to convert the upload — stub the conversion so this test only
+    # exercises the extension allow-list, not the host's converter.
+    monkeypatch.setattr(main, "_convert_to_pdf", lambda _p: None)
     for fname in ("doc.docx", "deck.pptx"):
         resp = client.post(
             "/api/documents",

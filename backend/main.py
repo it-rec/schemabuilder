@@ -12,6 +12,8 @@ import os
 import pkgutil
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -383,6 +385,10 @@ _text_lock = threading.Lock()
 _pdf_conversion_cache: "OrderedDict[tuple, str]" = OrderedDict()
 _pdf_conversion_lock = threading.Lock()
 _pdf_temp_dir = tempfile.mkdtemp(prefix="schemabuilder_")
+# Hard ceiling on a single headless-LibreOffice conversion. A cold soffice
+# start is ~1-3s; anything past this is a hung or looping process we'd rather
+# kill than let pile up on the threadpool.
+_LIBREOFFICE_TIMEOUT_S = 120
 
 # pypdfium2 wraps PDFium, whose C library shares process-global state and is
 # NOT thread-safe — concurrent calls from different threads (even on separate
@@ -522,7 +528,14 @@ def _file_signature(filepath: Path) -> tuple:
 
 
 def _convert_to_pdf(filepath: Path) -> Optional[Path]:
-    """Convert DOCX/PPTX to PDF using MS Office COM automation. Results are cached.
+    """Convert DOCX/PPTX to PDF. Results are cached.
+
+    Two backends, picked by platform:
+      * Windows — MS Office COM automation (pywin32). Highest fidelity.
+      * Other   — headless LibreOffice (`soffice --convert-to pdf`), the
+        standard server-side path. Slight font/layout drift vs. real Office,
+        but the bboxes we extract come from the produced PDF, so the viewer
+        overlays stay internally consistent with the rendered PNG.
 
     Cache key includes the source file's mtime+size so the cache is invalidated
     when the source is edited or replaced in place.
@@ -540,6 +553,32 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
         with _pdf_conversion_lock:
             _pdf_conversion_cache.pop(cache_key, None)
 
+    ext = filepath.suffix.lower()
+    if ext not in (".docx", ".pptx"):
+        return None
+    # Include the source extension in the temp PDF name so two source files
+    # that share a stem (e.g. report.docx and report.pptx) don't clobber each
+    # other's converted PDF and serve mixed content via the cache.
+    pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}{ext}.pdf"
+
+    if sys.platform == "win32":
+        _convert_to_pdf_office(filepath, pdf_path)
+    else:
+        _convert_to_pdf_libreoffice(filepath, pdf_path)
+
+    with _pdf_conversion_lock:
+        _lru_set(
+            _pdf_conversion_cache,
+            cache_key,
+            str(pdf_path),
+            _PDF_CONVERSION_CACHE_MAX,
+            on_evict=_evict_pdf_file,
+        )
+    return pdf_path
+
+
+def _convert_to_pdf_office(filepath: Path, pdf_path: Path) -> None:
+    """Convert DOCX/PPTX to PDF via MS Office COM automation (Windows backend)."""
     import pythoncom
     import win32com.client
 
@@ -557,10 +596,6 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
 
     ext = filepath.suffix.lower()
     abs_path = str(filepath.resolve())
-    # Include the source extension in the temp PDF name so two source files
-    # that share a stem (e.g. report.docx and report.pptx) don't clobber each
-    # other's converted PDF and serve mixed content via the cache.
-    pdf_path = Path(_pdf_temp_dir) / f"{filepath.stem}{ext}.pdf"
 
     # FastAPI dispatches sync endpoints to threadpool workers that have not
     # initialized COM, so Dispatch() raises "CoInitialize was not called".
@@ -609,20 +644,58 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
                 presentation.Close()
             finally:
                 ppt.Quit()
-        else:
-            return None
     finally:
         pythoncom.CoUninitialize()
 
-    with _pdf_conversion_lock:
-        _lru_set(
-            _pdf_conversion_cache,
-            cache_key,
-            str(pdf_path),
-            _PDF_CONVERSION_CACHE_MAX,
-            on_evict=_evict_pdf_file,
+
+def _convert_to_pdf_libreoffice(filepath: Path, pdf_path: Path) -> None:
+    """Convert DOCX/PPTX to PDF via headless LibreOffice (non-Windows backend).
+
+    `soffice --convert-to pdf` writes `<source-stem>.pdf` into `--outdir`, so
+    two inputs sharing a stem (report.docx / report.pptx) would collide in a
+    shared outdir. Each call gets its own temp outdir and the result is moved
+    to pdf_path (which encodes the source extension). The per-call
+    `UserInstallation` profile avoids "source locked" failures when several
+    conversions run concurrently on FastAPI's threadpool — a shared LO profile
+    is single-writer.
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice is None:
+        raise RuntimeError(
+            "LibreOffice not found. Install the `libreoffice` package "
+            "(or at least `libreoffice-writer` + `libreoffice-impress`) to "
+            "render DOCX/PPTX on non-Windows hosts."
         )
-    return pdf_path
+    with tempfile.TemporaryDirectory(dir=_pdf_temp_dir) as workdir:
+        profile_uri = (Path(workdir) / "profile").as_uri()
+        proc = subprocess.run(
+            [
+                soffice,
+                "--headless",
+                "--nologo",
+                "--nofirststartwizard",
+                f"-env:UserInstallation={profile_uri}",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                workdir,
+                str(filepath.resolve()),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_LIBREOFFICE_TIMEOUT_S,
+            check=False,
+        )
+        produced = Path(workdir) / f"{filepath.stem}.pdf"
+        if proc.returncode != 0 or not produced.exists():
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(
+                f"LibreOffice conversion of {filepath.name} failed "
+                f"(exit {proc.returncode}): {detail or 'no output'}"
+            )
+        # move, not copy: `produced` lives in workdir, which the
+        # TemporaryDirectory context manager is about to tear down.
+        shutil.move(str(produced), str(pdf_path))
 
 
 def _get_document_id(filename: str) -> str:
@@ -1252,10 +1325,10 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
     """
     source_path = filepath
     if filepath.suffix.lower() in (".docx", ".pptx"):
-        # _convert_to_pdf imports pythoncom/win32com at call time, which
-        # raises ModuleNotFoundError on non-Windows hosts (and the Office
-        # COM dispatch itself can raise on a Windows box without Word /
-        # PowerPoint installed). Catch both so we fall back to the original
+        # _convert_to_pdf can fail for environmental reasons we don't
+        # control: a Windows box without Word/PowerPoint installed, a
+        # non-Windows host without LibreOffice on PATH, or a conversion that
+        # times out or crashes. Catch broadly so we fall back to the original
         # file instead of failing extraction outright.
         try:
             converted = _convert_to_pdf(filepath)
