@@ -79,7 +79,8 @@ def test_matcher_attaches_normalized_value_for_currency():
     }
     entries = [_entry(0, "Total due: 1.234,56 EUR")]
     result = main._match_field_to_entries(field, entries, used_ids=set())
-    assert result["extracted_value"] is not None
+    # extracted_value is narrowed to just the money, not the whole sentence.
+    assert result["extracted_value"] == "1.234,56"
     assert result["normalized_value"] == pytest.approx(1234.56)
     assert result["normalizer"] == "currency"
 
@@ -89,6 +90,43 @@ def test_matcher_leaves_normalized_value_null_when_unparseable():
     entries = [_entry(0, "1234.56")]
     result = main._match_field_to_entries(field, entries, used_ids=set())
     assert result["normalized_value"] == pytest.approx(1234.56)
+
+
+def test_matcher_narrows_currency_with_sign_prefix():
+    """A currency-normalized field strips the surrounding prose down to the
+    money substring, keeping the currency sign."""
+    field = {"name": "total", "examples": ["1234.56"], "normalizer": "currency"}
+    entries = [_entry(0, "Amount payable: €1,234.56 (incl. VAT)")]
+    result = main._match_field_to_entries(field, entries, used_ids=set())
+    assert result["extracted_value"] == "€1,234.56"
+    assert result["normalized_value"] == pytest.approx(1234.56)
+
+
+def test_matcher_narrows_currency_with_sign_suffix():
+    field = {"name": "total", "examples": ["1234.56"], "normalizer": "currency"}
+    entries = [_entry(0, "Gesamtbetrag 1.234,56 € brutto")]
+    result = main._match_field_to_entries(field, entries, used_ids=set())
+    assert result["extracted_value"] == "1.234,56 €"
+    assert result["normalized_value"] == pytest.approx(1234.56)
+
+
+def test_matcher_narrows_currency_on_currency_sign_signal():
+    """Even without a normalizer, when the currency-sign heuristic is the
+    winning signal the value is narrowed to the money substring."""
+    field = {"name": "price", "examples": ["$"]}
+    entries = [_entry(0, "Paid €42 today")]
+    result = main._match_field_to_entries(field, entries, used_ids=set())
+    assert result["match_reason"] == "currency_sign"
+    assert result["extracted_value"] == "€42"
+
+
+def test_matcher_currency_falls_back_to_full_text_when_no_money_substring():
+    """If the matched entry has no detectable money substring, the currency
+    field keeps the full text rather than dropping the value entirely."""
+    field = {"name": "total", "examples": ["paid"], "normalizer": "currency"}
+    entries = [_entry(0, "paid")]
+    result = main._match_field_to_entries(field, entries, used_ids=set())
+    assert result["extracted_value"] == "paid"
 
 
 def test_matcher_skips_normalizer_when_unset():
