@@ -26,6 +26,7 @@ def client(tmp_path: Path, monkeypatch):
     main._doc_path_cache.clear()
     main._ocr_decision_cache.clear()
     main._signature_cache.clear()
+    main._combined_signature_cache.clear()
     return TestClient(main.app)
 
 

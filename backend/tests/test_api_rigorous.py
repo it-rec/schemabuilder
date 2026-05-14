@@ -29,6 +29,7 @@ def client(tmp_path: Path, monkeypatch):
     main._doc_listing_signature = None
     main._ocr_decision_cache.clear()
     main._signature_cache.clear()
+    main._combined_signature_cache.clear()
     with main._metrics_lock:
         for k in list(main._metrics.keys()):
             main._metrics[k] = 0
