@@ -541,11 +541,9 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
     # Word needs early binding (gencache.EnsureDispatch): late-bound Dispatch
     # returns a dynamic IDispatch proxy from Documents.Open that does not
     # resolve SaveAs via GetIDsOfNames, raising "AttributeError: Open.SaveAs".
-    # PowerPoint is the opposite: gencache-generated _Presentation.py routes
-    # ExportAsFixedFormat through _ApplyTypes_ with the full 16-arg typelib
-    # signature, and the unfilled VT_DISPATCH slot (PrintRange) trips
-    # "TypeError: The Python instance can not be converted to a COM object".
-    # So we use gencache for Word only and plain Dispatch for PowerPoint.
+    # PowerPoint uses plain Dispatch — the typelib path's VT_DISPATCH slot
+    # for PrintRange is filled explicitly in the call below, so we don't need
+    # gencache either way.
     def _ensure_dispatch_office(progid: str):
         try:
             return win32com.client.gencache.EnsureDispatch(progid)
@@ -585,11 +583,23 @@ def _convert_to_pdf(filepath: Path) -> Optional[Path]:
                 # system) end up offset and scaled wrong against the rendered
                 # PNG (which uses the letter-page MediaBox). Intent=Screen (1)
                 # preserves the slide's native dimensions verbatim.
+                # PrintRange (slot 8) must be supplied explicitly as None.
+                # The PowerPoint typelib types it as VT_DISPATCH and pywin32's
+                # _ApplyTypes_ can't synthesize a default for that slot — when
+                # the call runs short, packing the args trips
+                # "TypeError: The Python instance can not be converted to a
+                # COM object". Passing None overrides the missing-arg packer.
+                # The four slots before it (HandoutOrder, OutputType,
+                # PrintHiddenSlides) just take their defaults explicitly.
                 presentation.ExportAsFixedFormat(
                     str(pdf_path),
                     2,      # FixedFormatType: ppFixedFormatTypePDF
                     1,      # Intent: ppFixedFormatIntentScreen
                     False,  # FrameSlides: no border
+                    1,      # HandoutOrder: ppPrintHandoutVerticalFirst
+                    1,      # OutputType: ppPrintOutputSlides
+                    False,  # PrintHiddenSlides
+                    None,   # PrintRange: VT_DISPATCH — must be explicit
                 )
                 presentation.Close()
             finally:
