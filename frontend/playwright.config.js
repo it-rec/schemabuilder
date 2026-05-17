@@ -57,6 +57,11 @@ export default defineConfig({
     // Chromium in CI runs as root in the GH Actions runner; without
     // --no-sandbox the renderer process can't start. Harmless when not root.
     launchOptions: { args: ["--no-sandbox"] },
+    // Vite compiles the bundle lazily on first request; the default 30s
+    // navigation timeout was tight on free CI runners. The globalSetup
+    // warmup primes this, but leave headroom for retries.
+    navigationTimeout: 60_000,
+    actionTimeout: 15_000,
   },
   globalSetup: "./e2e/global-setup.js",
   webServer: [

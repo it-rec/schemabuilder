@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { request } from "@playwright/test";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +14,11 @@ const TMP_ROOT = path.resolve(__dirname, "..", "playwright", ".tmp");
 const TEST_DOCS_DIR = path.join(TMP_ROOT, "docs");
 const DEFINITIONS_DIR = path.join(TMP_ROOT, "defs");
 const FIXTURES_DIR = path.resolve(__dirname, "fixtures");
+
+const BACKEND_PORT = process.env.E2E_BACKEND_PORT || "8765";
+const FRONTEND_PORT = process.env.E2E_FRONTEND_PORT || "3000";
+const API_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+const FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
 
 function resetDir(dir) {
   if (fs.existsSync(dir)) {
@@ -69,4 +75,46 @@ export default async function globalSetup() {
     path.join(DEFINITIONS_DIR, "seed_definition.json"),
     JSON.stringify(seedDef, null, 2),
   );
+
+  // Warm both servers so the first test doesn't pay the cold-start cost:
+  //   - Vite compiles the React + Carbon bundle on the first navigation
+  //     (10-30s on a free CI runner); a single GET ahead of time means
+  //     every test starts against a warm bundle.
+  //   - Docling lazily builds its converter on the first /extract call
+  //     (also 10-30s). We trigger one extract here so the per-test 90s
+  //     timeout doesn't have to absorb that cost.
+  // Both are best-effort: a failure here doesn't stop the suite, the
+  // first real test will surface the underlying problem with better
+  // diagnostics than a globalSetup throw would.
+  const ctx = await request.newContext();
+  try {
+    await ctx
+      .get(FRONTEND_URL, { timeout: 60_000 })
+      .catch((err) => console.warn("frontend warmup skipped:", err.message));
+
+    // Find the seed doc id by listing — the id is a hash of the filename
+    // so we can't predict it, but the list endpoint is fast.
+    const listRes = await ctx
+      .get(`${API_URL}/api/documents`, { timeout: 30_000 })
+      .catch(() => null);
+    if (listRes && listRes.ok()) {
+      const body = await listRes.json();
+      const items = Array.isArray(body) ? body : body.items;
+      const seed = items.find((d) => d.filename === "sample.pdf");
+      if (seed) {
+        // The extract call may take 30-60s on first run while Docling
+        // builds its converter. Allow 180s; failure is non-fatal.
+        await ctx
+          .post(`${API_URL}/api/documents/${seed.id}/extract`, {
+            data: { definition_id: "seed_definition" },
+            timeout: 180_000,
+          })
+          .catch((err) =>
+            console.warn("docling warmup skipped:", err.message),
+          );
+      }
+    }
+  } finally {
+    await ctx.dispose();
+  }
 }
