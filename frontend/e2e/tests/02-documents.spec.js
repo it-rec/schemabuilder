@@ -147,19 +147,22 @@ test.describe("Document list", () => {
     await page
       .getByTestId("upload-input")
       .setInputFiles(path.join(FIXTURES_DIR, "sample.pdf"));
-    const second = page.getByRole("button", { name: /Select sample-1\.pdf/ });
-    await expect(second).toBeVisible();
+    const uploaded = page.getByRole("button", {
+      name: /Select sample-1\.pdf/,
+    });
+    const original = page.getByRole("button", {
+      name: /Select sample\.pdf,/,
+    });
+    await expect(uploaded).toBeVisible();
+    // sample-1.pdf is alphabetically first and was auto-selected after upload.
+    await expect(uploaded).toHaveAttribute("aria-pressed", "true");
 
-    // Press j → next, then k → previous. Focus is on body so the global
-    // listener fires.
+    // Focus the body so the global keydown handler fires (it bails out when
+    // focus is inside a form control).
     await page.locator("body").focus();
-    await page.keyboard.press("k");
-    // sample.pdf comes back as selected.
-    await expect(
-      page.getByRole("button", { name: /Select sample\.pdf/ }),
-    ).toHaveAttribute("aria-pressed", "true");
-
     await page.keyboard.press("j");
-    await expect(second).toHaveAttribute("aria-pressed", "true");
+    await expect(original).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("k");
+    await expect(uploaded).toHaveAttribute("aria-pressed", "true");
   });
 });

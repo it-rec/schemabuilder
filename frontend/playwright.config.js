@@ -30,16 +30,20 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
-  timeout: 60_000,
-  expect: { timeout: 10_000 },
+  // 90s per test covers a cold-start Docling extract on CI (the first
+  // /extract call rebuilds the converter; subsequent calls hit the cache).
+  // Most tests finish in seconds — the budget is for the outliers, not
+  // the steady state.
+  timeout: 90_000,
+  expect: { timeout: 15_000 },
   use: {
     baseURL: `http://127.0.0.1:${FRONTEND_PORT}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
-    // The frontend reads VITE_API_URL at build time, but the dev server
-    // exposes it via import.meta.env at request time — so the env we set
-    // on the webServer entry below is what gets picked up.
+    // Chromium in CI runs as root in the GH Actions runner; without
+    // --no-sandbox the renderer process can't start. Harmless when not root.
+    launchOptions: { args: ["--no-sandbox"] },
   },
   globalSetup: "./e2e/global-setup.js",
   webServer: [
@@ -49,10 +53,14 @@ export default defineConfig({
       // on the fast pypdfium2 text path; the bundled sample PDF is digital
       // so OCR isn't needed and disabling it cuts ~5-15s off the first
       // extract on a cold cache.
-      command: `python -m uvicorn main:app --host 127.0.0.1 --port ${BACKEND_PORT} --log-level warning`,
+      command: `python -m uvicorn main:app --host 127.0.0.1 --port ${BACKEND_PORT} --log-level info`,
       cwd: path.resolve(__dirname, "../backend"),
       url: `${API_URL}/health`,
-      timeout: 180_000,
+      // 5 min: importing main.py is fast (Docling is lazy), but on a fresh
+      // CI runner uvicorn boot occasionally takes longer when pip's wheel
+      // cache is still being unpacked. Generous on purpose — the timeout
+      // only fires when something is genuinely wrong.
+      timeout: 300_000,
       reuseExistingServer: !process.env.CI,
       stdout: "pipe",
       stderr: "pipe",
@@ -84,10 +92,8 @@ export default defineConfig({
       stderr: "pipe",
       env: {
         VITE_API_URL: API_URL,
-        // Faster failure when the test mocks /health to 503 so the offline
-        // overlay shows up within a few seconds instead of the default
-        // 30s timeout.
-        VITE_API_TIMEOUT_MS: "5000",
+        // Keep the API timeout at the app default (30s). A tighter value
+        // would bite extraction tests when Docling's first call is slow.
       },
     },
   ],

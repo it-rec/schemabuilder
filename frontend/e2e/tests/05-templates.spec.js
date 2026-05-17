@@ -15,20 +15,18 @@ test.describe("Definition templates", () => {
     await page.getByTestId("def-new-button").click();
     const editor = page.getByRole("dialog", { name: "New document class" });
 
-    const picker = editor.getByTestId("def-template-picker");
+    // Carbon's Dropdown forwards data-testid to the wrapper, not the
+    // trigger; open via the combobox role like the vitest suite does.
+    const picker = editor.getByRole("combobox", { name: /template/i });
     await expect(picker).toBeVisible();
-
-    // Open the dropdown and pick Invoice.
     await picker.click();
-    await page
-      .getByRole("option", { name: /Invoice \(\d+ fields\)/ })
-      .click();
+    await page.getByText(/Invoice \(\d+ fields\)/).click();
 
     // After hydration, the document type input is "Invoice".
     await expect(editor.getByLabel("Document type")).toHaveValue("Invoice");
 
-    // Cancel without saving — list of definitions in the dropdown shouldn't
-    // include "Invoice" (since we never saved).
+    // Cancel without saving — the dropdown should no longer include
+    // "Invoice" (since we never saved).
     await editor.getByRole("button", { name: "Cancel" }).click();
     await expect(editor).toBeHidden();
   });
@@ -42,11 +40,11 @@ test.describe("Definition templates", () => {
     await page.getByTestId("def-new-button").click();
     const editor = page.getByRole("dialog", { name: "New document class" });
 
-    await editor.getByTestId("def-template-picker").click();
-    await page.getByRole("option", { name: /Receipt \(\d+ fields\)/ }).click();
+    await editor.getByRole("combobox", { name: /template/i }).click();
+    await page.getByText(/Receipt \(\d+ fields\)/).click();
     await expect(editor.getByLabel("Document type")).toHaveValue("Receipt");
 
-    // Rename so we don't collide with anyone else's seed.
+    // Rename so we don't collide with the existing receipt template id.
     await editor.getByLabel("Document type").fill("Receipt E2E");
     await page.getByRole("button", { name: "Create" }).click();
     await expect(editor).toBeHidden();
