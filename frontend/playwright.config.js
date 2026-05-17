@@ -29,7 +29,20 @@ export default defineConfig({
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",
+  // In CI we want three things from the reporter:
+  //   - a streaming `list` so the GH Actions log shows live progress,
+  //   - the `github` reporter which emits ::error annotations the PR
+  //     check page surfaces inline (visible without sign-in on the
+  //     workflow run page), and
+  //   - an html + json report uploaded as artifacts for deep dives.
+  reporter: process.env.CI
+    ? [
+        ["list"],
+        ["github"],
+        ["html", { open: "never", outputFolder: "playwright-report" }],
+        ["json", { outputFile: "test-results/results.json" }],
+      ]
+    : "list",
   // 90s per test covers a cold-start Docling extract on CI (the first
   // /extract call rebuilds the converter; subsequent calls hit the cache).
   // Most tests finish in seconds — the budget is for the outliers, not

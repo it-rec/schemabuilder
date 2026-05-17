@@ -157,6 +157,65 @@ jobs:
           CI: "true"
         run: npm run test:e2e
 
+      - name: Publish failure summary
+        # Runs even on success so a green build still gets a one-line
+        # summary, but the interesting case is failure: parse the json
+        # reporter output and write each failed test (with its error
+        # message) into GITHUB_STEP_SUMMARY. The summary block is rendered
+        # at the bottom of the workflow run page and is visible to anyone
+        # who can see the repo, even without an auth token to fetch the
+        # raw log stream.
+        if: always()
+        working-directory: frontend
+        run: |
+          set +e
+          F=test-results/results.json
+          {
+            echo "## Playwright results"
+            if [ ! -f "$F" ]; then
+              echo "_(no json report — Playwright likely failed before the suite started)_"
+              exit 0
+            fi
+            node -e '
+              const r = JSON.parse(require("fs").readFileSync("test-results/results.json", "utf8"));
+              const s = r.stats || {};
+              console.log(`- expected: ${s.expected ?? 0}`);
+              console.log(`- unexpected (failed): ${s.unexpected ?? 0}`);
+              console.log(`- flaky: ${s.flaky ?? 0}`);
+              console.log(`- skipped: ${s.skipped ?? 0}`);
+              const failed = [];
+              const walk = (suites=[]) => {
+                for (const s of suites) {
+                  for (const sp of s.specs || []) {
+                    for (const t of sp.tests || []) {
+                      for (const res of t.results || []) {
+                        if (res.status !== "passed" && res.status !== "skipped") {
+                          failed.push({
+                            title: `${s.title} > ${sp.title}`,
+                            error: (res.error && (res.error.message || res.error.value)) || res.errors?.[0]?.message || "(no message)",
+                          });
+                        }
+                      }
+                    }
+                  }
+                  walk(s.suites);
+                }
+              };
+              walk(r.suites || []);
+              if (failed.length === 0) {
+                console.log("\nAll tests passed.");
+              } else {
+                console.log("\n### Failures");
+                for (const f of failed) {
+                  console.log(`\n#### ${f.title}`);
+                  console.log("```");
+                  console.log(String(f.error).split("\n").slice(0, 30).join("\n"));
+                  console.log("```");
+                }
+              }
+            '
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
