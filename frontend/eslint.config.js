@@ -78,4 +78,30 @@ export default [
       },
     },
   },
+  // Playwright E2E suite. Runs in Node, not the browser; imports come from
+  // @playwright/test instead of vitest's globals. Allow Node globals and
+  // soften a few rules that don't fit Node-side test scaffolding.
+  {
+    files: ["e2e/**/*.js", "playwright.config.js"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+        Buffer: "readonly",
+      },
+    },
+    rules: {
+      "no-unused-vars": [
+        "warn",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
+      "no-empty-pattern": "off",
+    },
+  },
 ];

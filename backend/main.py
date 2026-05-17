@@ -323,8 +323,15 @@ app.add_middleware(
 # definitions grow). PNGs are already compressed and skipped by min size.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-TEST_DOCS_DIR = Path(__file__).parent / "test_documents"
-DEFINITIONS_DIR = Path(__file__).parent / "definitions"
+# Both paths can be overridden via env so an E2E harness can point them at
+# isolated tmpdirs and avoid mutating the checked-in fixtures under
+# backend/test_documents and backend/definitions.
+TEST_DOCS_DIR = Path(
+    os.getenv("SCHEMABUILDER_TEST_DOCS_DIR") or (Path(__file__).parent / "test_documents")
+)
+DEFINITIONS_DIR = Path(
+    os.getenv("SCHEMABUILDER_DEFINITIONS_DIR") or (Path(__file__).parent / "definitions")
+)
 # Read-only catalog of starter definitions. Loaded fresh on every request:
 # the directory is small (single-digit JSON files) and a stale cache would be
 # more annoying than a few hundred microseconds per call.
