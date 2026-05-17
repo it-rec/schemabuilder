@@ -37,7 +37,7 @@ test.describe("Field extraction", () => {
     // Create a second definition so we have something to switch to.
     await page.getByTestId("def-new-button").click();
     await page.getByLabel("Document type").fill("Switch Target");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(
       page.getByRole("dialog", { name: "New document class" }),
     ).toBeHidden();
@@ -49,20 +49,20 @@ test.describe("Field extraction", () => {
     await expect(fields).toContainText(/0\/0 found/);
   });
 
-  test("loading state shows while extraction runs", async ({ page }) => {
+  test("panel shows extraction results once /extract resolves", async ({
+    page,
+  }) => {
+    // We can't reliably observe the transient "Extracting…" copy because
+    // selectSampleDocument() may be a no-op (the seeded sample is already
+    // auto-selected after page load) and a fresh extract may have completed
+    // during globalSetup's warmup. The stable post-state is enough: the
+    // panel ends up rendering the definition's title with a match tag.
     await page.goto("/");
     await waitForAppReady(page);
-
-    // Click a doc — viewer load AND extraction kick off together. The
-    // fields panel shows the loading copy until /extract resolves.
-    const extractPromise = page.waitForResponse(
-      (r) => r.url().includes("/extract") && r.request().method() === "POST",
-    );
     await selectSampleDocument(page);
-    // Don't await the loading text — on a warm backend it can be gone by the
-    // time the assertion runs. Just wait for the response and then assert
-    // the panel ended in the post-extract state.
-    await extractPromise;
-    await expect(page.getByTestId("fields-panel")).toContainText("Seed Definition");
+
+    const fields = page.getByTestId("fields-panel");
+    await expect(fields).toContainText("Seed Definition");
+    await expect(fields).toContainText(/\d+\/3 found/);
   });
 });

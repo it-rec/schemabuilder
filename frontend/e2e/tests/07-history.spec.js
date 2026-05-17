@@ -5,6 +5,19 @@ test.beforeEach(() => {
   resetBackendStateToSeed();
 });
 
+// Carbon's ComposedModal renders both a header close-icon (aria-label "Close")
+// and a footer Close button. getByRole("button", { name: "Close" }) matches
+// both — pick the footer one by its visible text content.
+function footerCloseButton(dlg) {
+  return dlg.locator("button").filter({ hasText: /^Close$/ });
+}
+
+// The editor has a main "Description" textarea AND per-field "Description"
+// textareas (one per field, two for the array sub-fields). Scope by id.
+function mainDescription(editor) {
+  return editor.locator("#def-document-description");
+}
+
 test.describe("Definition history", () => {
   test("empty state for a freshly seeded definition", async ({ page }) => {
     await page.goto("/");
@@ -16,7 +29,7 @@ test.describe("Definition history", () => {
     const dlg = page.getByRole("dialog", { name: "Definition history" });
     await expect(dlg).toBeVisible();
     await expect(dlg).toContainText(/No archived versions/);
-    await dlg.getByRole("button", { name: "Close" }).click();
+    await footerCloseButton(dlg).click();
   });
 
   test("editing a definition creates a version that history can show", async ({
@@ -28,9 +41,7 @@ test.describe("Definition history", () => {
     // Force a save (which archives the previous content).
     await page.getByTestId("def-edit-button").click();
     const editor = page.getByRole("dialog", { name: "Edit document class" });
-    await editor
-      .getByLabel("Description")
-      .fill(`Bumped ${new Date().toISOString()}`);
+    await mainDescription(editor).fill(`Bumped ${new Date().toISOString()}`);
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(editor).toBeHidden();
 

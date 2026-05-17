@@ -33,7 +33,7 @@ test.describe("Definition CRUD", () => {
     await page.getByTestId("def-new-button").click();
 
     // "Create" button is disabled because the required field is empty.
-    const save = page.getByRole("button", { name: "Create" });
+    const save = page.getByRole("button", { name: "Create", exact: true });
     await expect(save).toBeDisabled();
   });
 
@@ -45,7 +45,7 @@ test.describe("Definition CRUD", () => {
     await page.getByLabel("Document type").fill("Custom Class");
     await page.getByLabel("Description").fill("Created in E2E");
 
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     // Modal closes, dropdown lists the new entry.
     await expect(
       page.getByRole("dialog", { name: "New document class" }),
@@ -58,7 +58,9 @@ test.describe("Definition CRUD", () => {
     await page.getByTestId("def-edit-button").click();
     const editor = page.getByRole("dialog", { name: "Edit document class" });
     await expect(editor).toBeVisible();
-    await editor.getByLabel("Description").fill("Edited in E2E");
+    // Scope by id — per-field "Description" textareas would otherwise
+    // trip strict mode in defs that have any fields.
+    await editor.locator("#def-document-description").fill("Edited in E2E");
     await page.getByRole("button", { name: "Save changes" }).click();
     await expect(editor).toBeHidden();
   });
@@ -72,7 +74,7 @@ test.describe("Definition CRUD", () => {
     // First create.
     await page.getByTestId("def-new-button").click();
     await page.getByLabel("Document type").fill("Dup Class");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(
       page.getByRole("dialog", { name: "New document class" }),
     ).toBeHidden();
@@ -80,7 +82,7 @@ test.describe("Definition CRUD", () => {
     // Second create with same name → server returns 409.
     await page.getByTestId("def-new-button").click();
     await page.getByLabel("Document type").fill("Dup Class");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(
       page.getByRole("dialog", { name: "New document class" }),
     ).toContainText(/already exists/i);
@@ -94,7 +96,7 @@ test.describe("Definition CRUD", () => {
     // (the seed will still be there).
     await page.getByTestId("def-new-button").click();
     await page.getByLabel("Document type").fill("Delete Me");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(page.locator("#definition-selector")).toContainText(
       "Delete Me",
     );

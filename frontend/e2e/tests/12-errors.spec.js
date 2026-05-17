@@ -116,7 +116,7 @@ test.describe("UI surfaces error states", () => {
 
     await page.getByTestId("def-new-button").click();
     await page.getByLabel("Document type").fill("Will Fail");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
 
     const dialog = page.getByRole("dialog", { name: "New document class" });
     await expect(dialog).toContainText(/Mocked failure|Save failed/);

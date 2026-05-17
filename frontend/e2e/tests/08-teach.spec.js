@@ -19,21 +19,21 @@ test.describe("Click-to-teach", () => {
     await selectSampleDocument(page);
     await selectSeedDefinition(page);
 
-    // Wait for the doc image to load so overlays are positioned.
+    // Wait for the doc image to load so overlays are positioned. The
+    // /extract POST may have already happened before this test ran
+    // (warmup + auto-extract on load) so we wait on the UI state — a
+    // teach-target overlay only renders after extraction populates
+    // text_entries.
     await page
       .locator("img.document-viewer__image")
       .first()
       .waitFor({ state: "visible" });
 
-    // Wait for /extract so text_entries are in state and the overlays render.
-    await page.waitForResponse(
-      (r) => r.url().includes("/extract") && r.request().method() === "POST",
-    );
-
-    // Take the first teach-target overlay that materializes (sample.pdf is a
-    // digital PDF; pypdfium2 always yields at least a handful of text spans).
+    // Sample.pdf is a digital PDF; pypdfium2 always yields at least a
+    // handful of text spans. Give the overlay a generous timeout for the
+    // worst-case cold extract on a CI runner.
     const target = page.locator('[data-testid^="teach-target-"]').first();
-    await target.waitFor({ state: "visible" });
+    await target.waitFor({ state: "visible", timeout: 60_000 });
     await target.click();
 
     const modal = page.getByRole("dialog", { name: "Teach example" });
@@ -53,9 +53,10 @@ test.describe("Click-to-teach", () => {
       .locator("img.document-viewer__image")
       .first()
       .waitFor({ state: "visible" });
-    await page.waitForResponse(
-      (r) => r.url().includes("/extract") && r.request().method() === "POST",
-    );
+    await page
+      .locator('[data-testid^="teach-target-"]')
+      .first()
+      .waitFor({ state: "visible", timeout: 60_000 });
 
     await page.locator('[data-testid^="teach-target-"]').first().click();
     const modal = page.getByRole("dialog", { name: "Teach example" });

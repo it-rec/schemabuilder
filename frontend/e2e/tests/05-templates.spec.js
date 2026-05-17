@@ -46,7 +46,7 @@ test.describe("Definition templates", () => {
 
     // Rename so we don't collide with the existing receipt template id.
     await editor.getByLabel("Document type").fill("Receipt E2E");
-    await page.getByRole("button", { name: "Create" }).click();
+    await page.getByRole("button", { name: "Create", exact: true }).click();
     await expect(editor).toBeHidden();
 
     await expect(page.locator("#definition-selector")).toContainText(
