@@ -318,6 +318,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Content-Disposition carries the filename for codegen / CSV downloads.
+    # Without an explicit expose, the browser hides it from JS in cross-
+    # origin responses and the frontend falls back to a synthetic name.
+    expose_headers=["Content-Disposition"],
 )
 # Compress JSON responses (extraction payloads can be tens of KB once
 # definitions grow). PNGs are already compressed and skipped by min size.

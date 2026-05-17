@@ -13,7 +13,7 @@ test.beforeEach(() => {
 });
 
 test.describe("Error paths via the API", () => {
-  test("uploading an unsupported extension returns 400", async ({ request }) => {
+  test("uploading an unsupported extension returns 415", async ({ request }) => {
     const res = await request.post(`${API_URL}/api/documents`, {
       multipart: {
         file: {
@@ -23,7 +23,7 @@ test.describe("Error paths via the API", () => {
         },
       },
     });
-    expect(res.status()).toBe(400);
+    expect(res.status()).toBe(415);
   });
 
   test("GETting an unknown document id returns 404", async ({ request }) => {

@@ -35,26 +35,32 @@ test.describe("Batch extraction", () => {
   }) => {
     await page.goto("/");
     await waitForAppReady(page);
+    // The Run-all click is dropped if the doc list hasn't loaded yet
+    // (filtered.length === 0 disables the button). Wait for the seeded
+    // row to materialize before clicking.
+    await expect(docRow(page, "sample.pdf")).toBeVisible();
     await selectSeedDefinition(page);
 
     await page.getByTestId("batch-run-button").click();
     const modal = page.getByRole("dialog", { name: "Batch extraction" });
+    await expect(modal).toBeVisible();
     await modal.getByTestId("batch-start").click();
 
     // Progress bar appears once status leaves "idle".
     await expect(modal.getByTestId("batch-progress")).toBeVisible();
 
-    // Wait for the terminal state — the close-row "Close" button
-    // appears once the job is no longer running.
-    await expect(modal.getByRole("button", { name: "Close" })).toBeVisible({
+    // Wait for the terminal state — the download button only enables when
+    // the run is no longer running. Use that as the "done" signal; the
+    // footer "Close" label collides with the modal header close-icon.
+    await expect(modal.getByTestId("batch-download")).toBeEnabled({
       timeout: 120_000,
     });
-    await expect(modal.getByTestId("batch-download")).toBeEnabled();
   });
 
   test("cancel mid-run flips to the cancelled state", async ({ page }) => {
     await page.goto("/");
     await waitForAppReady(page);
+    await expect(docRow(page, "sample.pdf")).toBeVisible();
     await selectSeedDefinition(page);
 
     // Upload extras so the job takes long enough to cancel.
@@ -63,6 +69,10 @@ test.describe("Batch extraction", () => {
         .getByTestId("upload-input")
         .setInputFiles(path.join(FIXTURES_DIR, "sample.pdf"));
     }
+    // Wait for all three to land — without this the click can fire before
+    // the docs list re-renders, leaving the cancel-test with only 1 doc.
+    await expect(docRow(page, "sample-3.pdf")).toBeVisible();
+
     await page.getByTestId("batch-run-button").click();
     const modal = page.getByRole("dialog", { name: "Batch extraction" });
     await modal.getByTestId("batch-start").click();

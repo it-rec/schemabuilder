@@ -61,10 +61,13 @@ test.describe("Click-to-teach", () => {
     await page.locator('[data-testid^="teach-target-"]').first().click();
     const modal = page.getByRole("dialog", { name: "Teach example" });
 
-    // Top-level scalars and dotted array sub-paths both appear.
+    // Top-level scalars and dotted array sub-paths both appear. The
+    // ExampleTeacher renders array sub-field labels as
+    // "<array name with spaces> › <subfield name with spaces>" — the
+    // underscore is replaced for display.
     await expect(modal.getByLabel(/^title$/)).toBeVisible();
     await expect(modal.getByLabel(/^amount$/)).toBeVisible();
-    await expect(modal.getByLabel(/line_items.*description/)).toBeVisible();
+    await expect(modal.getByLabel(/line items.*description/)).toBeVisible();
   });
 
   test("backend API: duplicate example returns 409", async ({ request }) => {

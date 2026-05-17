@@ -32,17 +32,22 @@ test.describe("Offline overlay", () => {
     await expect(page.getByTestId("document-list-panel")).toBeVisible();
   });
 
-  test("app shell is marked inert while offline", async ({ page }) => {
+  test("app shell is not interactive while offline", async ({ page }) => {
     await page.route("**/health", (route) => route.abort("failed"));
     await page.goto("/");
     await expect(page.getByTestId("offline-overlay")).toBeVisible();
 
-    // The app-shell wrapper carries inert when offline; the testids inside it
-    // should reflect the same. Asserting on the attribute on the wrapper is
-    // enough — its DOM presence is the contract.
-    const hasInert = await page.evaluate(
-      () => document.querySelector(".app-shell")?.hasAttribute("inert"),
-    );
-    expect(hasInert).toBe(true);
+    // The contract is that interaction inside the app shell is blocked
+    // while the overlay is up. React 19 renders <div inert={""}> as
+    // <div inert=""> in the DOM; the overlay itself is rendered outside
+    // the inert subtree so its retry indicator stays operable. Assert
+    // both halves of the contract: the inert attribute is on the shell
+    // and the overlay is reachable.
+    const shellInert = await page
+      .locator(".app-shell")
+      .first()
+      .evaluate((el) => el.hasAttribute("inert"));
+    expect(shellInert).toBe(true);
+    await expect(page.getByTestId("offline-overlay-loading")).toBeVisible();
   });
 });
