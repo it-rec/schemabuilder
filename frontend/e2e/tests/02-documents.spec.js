@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   FIXTURES_DIR,
+  docRow,
+  docDeleteButton,
   resetBackendStateToSeed,
   waitForAppReady,
   selectSampleDocument,
@@ -18,7 +20,7 @@ test.describe("Document list", () => {
     await page.goto("/");
     await waitForAppReady(page);
 
-    const row = page.getByRole("button", { name: /Select sample\.pdf/ });
+    const row = docRow(page, "sample.pdf");
     await expect(row).toBeVisible();
     await expect(row).toContainText(/KB|B/);
   });
@@ -27,13 +29,14 @@ test.describe("Document list", () => {
     await page.goto("/");
     await waitForAppReady(page);
 
-    const search = page.getByLabel("Search documents");
+    // Carbon's <Search> renders both a wrapper <div role="search"> and a
+    // child <input role="searchbox">; getByLabel matches both. Target the
+    // input explicitly to avoid the strict-mode violation.
+    const search = page.getByRole("searchbox", { name: "Search documents" });
     await search.fill("nope-no-match");
     await expect(page.getByText("No documents found.")).toBeVisible();
     await search.fill("");
-    await expect(
-      page.getByRole("button", { name: /Select sample\.pdf/ }),
-    ).toBeVisible();
+    await expect(docRow(page, "sample.pdf")).toBeVisible();
   });
 
   test("uploads a PDF, it appears and is auto-selected", async ({ page }) => {
@@ -42,15 +45,15 @@ test.describe("Document list", () => {
 
     // The hidden <input type="file"> is wired directly; setInputFiles is
     // the canonical way to drive it without clicking the visible button.
-    const input = page.getByTestId("upload-input");
-    await input.setInputFiles(path.join(FIXTURES_DIR, "sample.pdf"));
+    await page
+      .getByTestId("upload-input")
+      .setInputFiles(path.join(FIXTURES_DIR, "sample.pdf"));
 
     // Backend renames collisions with `-1`, `-2`, … — there's already a
     // sample.pdf seeded so the upload lands as sample-1.pdf.
-    const newRow = page.getByRole("button", { name: /Select sample-1\.pdf/ });
+    const newRow = docRow(page, "sample-1.pdf");
     await expect(newRow).toBeVisible();
-    // Auto-select pushes the upload to selected — verify by aria-pressed.
-    await expect(newRow).toHaveAttribute("aria-pressed", "true");
+    await expect(newRow).toHaveClass(/document-list__row--selected/);
   });
 
   test("uploads a DOCX file", async ({ page }) => {
@@ -61,9 +64,7 @@ test.describe("Document list", () => {
       .getByTestId("upload-input")
       .setInputFiles(path.join(FIXTURES_DIR, "sample.docx"));
 
-    await expect(
-      page.getByRole("button", { name: /Select sample\.docx/ }),
-    ).toBeVisible();
+    await expect(docRow(page, "sample.docx")).toBeVisible();
   });
 
   test("uploads a PPTX file", async ({ page }) => {
@@ -74,9 +75,7 @@ test.describe("Document list", () => {
       .getByTestId("upload-input")
       .setInputFiles(path.join(FIXTURES_DIR, "sample.pptx"));
 
-    await expect(
-      page.getByRole("button", { name: /Select sample\.pptx/ }),
-    ).toBeVisible();
+    await expect(docRow(page, "sample.pptx")).toBeVisible();
   });
 
   test("rejects unsupported file extension on the server", async ({ page }) => {
@@ -90,9 +89,7 @@ test.describe("Document list", () => {
     try {
       await page.getByTestId("upload-input").setInputFiles(tmpTxt);
       // The list should still only contain sample.pdf — no doc named bad.txt.
-      await expect(
-        page.getByRole("button", { name: /Select bad\.txt/ }),
-      ).toHaveCount(0);
+      await expect(docRow(page, "bad.txt")).toHaveCount(0);
     } finally {
       fs.rmSync(tmpTxt, { force: true });
     }
@@ -107,13 +104,11 @@ test.describe("Document list", () => {
     await page
       .getByTestId("upload-input")
       .setInputFiles(path.join(FIXTURES_DIR, "sample.pdf"));
-    const uploaded = page.getByRole("button", { name: /Select sample-1\.pdf/ });
+    const uploaded = docRow(page, "sample-1.pdf");
     await expect(uploaded).toBeVisible();
 
-    // Locate the trash button via the IconButton aria-label.
-    const trash = page.getByRole("button", { name: /Delete sample-1\.pdf/ });
     page.once("dialog", (d) => d.accept());
-    await trash.click();
+    await docDeleteButton(page, "sample-1.pdf").click();
     await expect(uploaded).toHaveCount(0);
   });
 
@@ -122,10 +117,8 @@ test.describe("Document list", () => {
     await waitForAppReady(page);
 
     page.once("dialog", (d) => d.dismiss());
-    await page.getByRole("button", { name: /Delete sample\.pdf/ }).click();
-    await expect(
-      page.getByRole("button", { name: /Select sample\.pdf/ }),
-    ).toBeVisible();
+    await docDeleteButton(page, "sample.pdf").click();
+    await expect(docRow(page, "sample.pdf")).toBeVisible();
   });
 
   test("selecting a row updates the viewer", async ({ page }) => {
@@ -134,9 +127,9 @@ test.describe("Document list", () => {
 
     await selectSampleDocument(page);
     // Viewer header shows "Page 1 of 2" for the bundled sample.
-    await expect(
-      page.getByTestId("document-viewer-panel"),
-    ).toContainText(/Page 1 of \d+/);
+    await expect(page.getByTestId("document-viewer-panel")).toContainText(
+      /Page 1 of \d+/,
+    );
   });
 
   test("j and k keyboard shortcuts navigate the list", async ({ page }) => {
@@ -147,22 +140,18 @@ test.describe("Document list", () => {
     await page
       .getByTestId("upload-input")
       .setInputFiles(path.join(FIXTURES_DIR, "sample.pdf"));
-    const uploaded = page.getByRole("button", {
-      name: /Select sample-1\.pdf/,
-    });
-    const original = page.getByRole("button", {
-      name: /Select sample\.pdf,/,
-    });
+    const uploaded = docRow(page, "sample-1.pdf");
+    const original = docRow(page, "sample.pdf");
     await expect(uploaded).toBeVisible();
     // sample-1.pdf is alphabetically first and was auto-selected after upload.
-    await expect(uploaded).toHaveAttribute("aria-pressed", "true");
+    await expect(uploaded).toHaveClass(/document-list__row--selected/);
 
     // Focus the body so the global keydown handler fires (it bails out when
     // focus is inside a form control).
     await page.locator("body").focus();
     await page.keyboard.press("j");
-    await expect(original).toHaveAttribute("aria-pressed", "true");
+    await expect(original).toHaveClass(/document-list__row--selected/);
     await page.keyboard.press("k");
-    await expect(uploaded).toHaveAttribute("aria-pressed", "true");
+    await expect(uploaded).toHaveClass(/document-list__row--selected/);
   });
 });

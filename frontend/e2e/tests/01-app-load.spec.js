@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { resetBackendStateToSeed, waitForAppReady } from "../helpers.js";
+import { docRow, resetBackendStateToSeed, waitForAppReady } from "../helpers.js";
 
 test.beforeEach(() => {
   resetBackendStateToSeed();
@@ -18,9 +18,7 @@ test.describe("App load", () => {
     await expect(page.getByTestId("fields-panel")).toBeVisible();
 
     // Seeded document appears.
-    await expect(
-      page.getByRole("button", { name: /Select sample\.pdf/ }),
-    ).toBeVisible();
+    await expect(docRow(page, "sample.pdf")).toBeVisible();
 
     // Seeded definition appears in the dropdown (auto-selected as the only
     // entry so the title is rendered in the trigger label).

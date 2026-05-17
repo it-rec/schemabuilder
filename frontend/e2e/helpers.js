@@ -96,8 +96,33 @@ export async function selectSeedDefinition(page) {
 }
 
 // Convenience for selecting the seeded sample document.
+// Carbon's StructuredListRow renders as a non-button element even when we
+// pass role="button" via props (the role attribute lands on the DOM but
+// Playwright's accessibility tree doesn't surface it as a button — likely
+// because Carbon sets a different role internally). Use the data-testid
+// pattern instead, scoped by filename text so we never click the wrong
+// row when multiple uploads (sample.pdf + sample-1.pdf) coexist.
+export function docRow(page, filename) {
+  return page
+    .locator('[data-testid^="doc-row-"]')
+    .filter({ hasText: filename });
+}
+
+export function docDeleteButton(page, filename) {
+  // The IconButton is a real <button> so the role *does* resolve; scope to
+  // within the matching row so we never delete the wrong file when several
+  // rows share a filename prefix.
+  return docRow(page, filename).getByRole("button", {
+    name: `Delete ${filename}`,
+  });
+}
+
+export async function selectDocument(page, filename) {
+  await docRow(page, filename).click();
+}
+
 export async function selectSampleDocument(page) {
-  await page.getByRole("button", { name: /Select sample\.pdf/ }).click();
+  await selectDocument(page, "sample.pdf");
 }
 
 // Read a known test-doc id from the API: we can't predict the hashed id

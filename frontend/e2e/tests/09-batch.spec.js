@@ -2,6 +2,7 @@ import { test, expect } from "@playwright/test";
 import path from "node:path";
 import {
   FIXTURES_DIR,
+  docRow,
   resetBackendStateToSeed,
   waitForAppReady,
   selectSeedDefinition,
@@ -21,9 +22,7 @@ test.describe("Batch extraction", () => {
     await page
       .getByTestId("upload-input")
       .setInputFiles(path.join(FIXTURES_DIR, "sample.pdf"));
-    await expect(
-      page.getByRole("button", { name: /Select sample-1\.pdf/ }),
-    ).toBeVisible();
+    await expect(docRow(page, "sample-1.pdf")).toBeVisible();
 
     await page.getByTestId("batch-run-button").click();
     const modal = page.getByRole("dialog", { name: "Batch extraction" });
