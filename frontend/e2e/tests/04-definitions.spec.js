@@ -102,7 +102,13 @@ test.describe("Definition CRUD", () => {
     // Open edit modal and delete.
     await page.getByTestId("def-edit-button").click();
     page.once("dialog", (d) => d.accept());
-    await page.getByRole("button", { name: "Delete" }).click();
+    // The trash IconButton in the document list has tooltip "Delete sample.pdf"
+    // and tripped strict mode when scoped to the whole page. Scope to the
+    // editor dialog to pick the danger button unambiguously.
+    await page
+      .getByRole("dialog", { name: "Edit document class" })
+      .getByRole("button", { name: "Delete" })
+      .click();
 
     // Wait for the modal to close, then check the dropdown no longer
     // contains "Delete Me".

@@ -46,22 +46,30 @@ export function resetBackendStateToSeed() {
     fs.rmSync(versionsDir, { recursive: true, force: true });
   }
   // Re-write the seed definition verbatim (in case an edit test mutated it).
+  // Backend reads `data["document"]["document_type"]` — flat shape would
+  // load with document_type defaulting to "Unknown".
   const seedDef = {
-    document_type: "Seed Definition",
-    document_description: "Seeded by E2E setup. Safe to overwrite.",
-    fields: [
-      { name: "title", description: "Document title" },
-      { name: "amount", description: "Some monetary amount", normalizer: "currency" },
-      {
-        name: "line_items",
-        type: "array",
-        description: "Repeating rows",
-        fields: [
-          { name: "description" },
-          { name: "qty", normalizer: "number" },
-        ],
-      },
-    ],
+    document: {
+      document_type: "Seed Definition",
+      document_description: "Seeded by E2E setup. Safe to overwrite.",
+      fields: [
+        { name: "title", description: "Document title" },
+        {
+          name: "amount",
+          description: "Some monetary amount",
+          normalizer: "currency",
+        },
+        {
+          name: "line_items",
+          type: "array",
+          description: "Repeating rows",
+          fields: [
+            { name: "description" },
+            { name: "qty", normalizer: "number" },
+          ],
+        },
+      ],
+    },
   };
   fs.writeFileSync(
     path.join(DEFINITIONS_DIR, `${SEED_DEF_ID}.json`),

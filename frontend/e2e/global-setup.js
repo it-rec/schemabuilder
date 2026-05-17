@@ -47,29 +47,30 @@ export default async function globalSetup() {
   // Seed a known definition that matches fields in sample.pdf. Kept minimal
   // (one always-required-field, one optional, one array) so extraction tests
   // have something to display without depending on a specific PDF's content.
+  // Backend stores definitions under the `document` wrapper — flat shape
+  // would load with `document_type` defaulting to "Unknown".
   const seedDef = {
-    document_type: "Seed Definition",
-    document_description: "Seeded by E2E setup. Safe to overwrite.",
-    fields: [
-      {
-        name: "title",
-        description: "Document title",
-      },
-      {
-        name: "amount",
-        description: "Some monetary amount",
-        normalizer: "currency",
-      },
-      {
-        name: "line_items",
-        type: "array",
-        description: "Repeating rows",
-        fields: [
-          { name: "description" },
-          { name: "qty", normalizer: "number" },
-        ],
-      },
-    ],
+    document: {
+      document_type: "Seed Definition",
+      document_description: "Seeded by E2E setup. Safe to overwrite.",
+      fields: [
+        { name: "title", description: "Document title" },
+        {
+          name: "amount",
+          description: "Some monetary amount",
+          normalizer: "currency",
+        },
+        {
+          name: "line_items",
+          type: "array",
+          description: "Repeating rows",
+          fields: [
+            { name: "description" },
+            { name: "qty", normalizer: "number" },
+          ],
+        },
+      ],
+    },
   };
   fs.writeFileSync(
     path.join(DEFINITIONS_DIR, "seed_definition.json"),
