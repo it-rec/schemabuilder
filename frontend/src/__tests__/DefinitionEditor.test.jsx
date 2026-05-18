@@ -257,7 +257,7 @@ test("edit flow: delete calls API after confirmation", async () => {
   );
 
   await screen.findByDisplayValue("Invoice");
-  await user.click(screen.getByRole("button", { name: /danger Delete/i }));
+  await user.click(screen.getByRole("button", { name: /danger\s*delete/i }));
   await waitFor(() => expect(api.deleteDefinition).toHaveBeenCalledWith("invoice"));
   expect(onDeleted).toHaveBeenCalledWith("invoice");
 });
@@ -281,7 +281,7 @@ test("edit flow: cancelling the confirm dialog skips deletion", async () => {
   );
 
   await screen.findByDisplayValue("Invoice");
-  await user.click(screen.getByRole("button", { name: /danger Delete/i }));
+  await user.click(screen.getByRole("button", { name: /danger\s*delete/i }));
   expect(api.deleteDefinition).not.toHaveBeenCalled();
 });
 
