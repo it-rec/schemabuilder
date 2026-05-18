@@ -53,6 +53,14 @@ export default function BatchExtractModal({
     };
   }, []);
 
+  // Recursive setTimeout chain — the rescheduled tick has to dispatch the
+  // next poll. Reaching back through the `pollOnce` binding inside its own
+  // useCallback would TDZ-capture the const while it's still being
+  // initialized (works in practice because the timer fires later, but the
+  // linter rightly flags it as an unstable self-reference). Stash the
+  // latest callable on a ref so the timer indirectly resolves to whatever
+  // `pollOnce` is at the moment the timer fires.
+  const pollOnceRef = useRef(null);
   const pollOnce = useCallback(async (id) => {
     try {
       const s = await getBatchStatus(id);
@@ -61,13 +69,19 @@ export default function BatchExtractModal({
       setResults(s.results || {});
       setStatus(s.status);
       if (s.status === "running") {
-        pollTimerRef.current = setTimeout(() => pollOnce(id), POLL_INTERVAL_MS);
+        pollTimerRef.current = setTimeout(
+          () => pollOnceRef.current?.(id),
+          POLL_INTERVAL_MS,
+        );
       }
     } catch (err) {
       console.error(err);
       setStatus("failed");
     }
   }, []);
+  useEffect(() => {
+    pollOnceRef.current = pollOnce;
+  }, [pollOnce]);
 
   const handleStart = useCallback(async () => {
     if (!documents.length || !definitionId) return;
