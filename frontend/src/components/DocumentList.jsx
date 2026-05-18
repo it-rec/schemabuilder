@@ -175,6 +175,9 @@ export default function DocumentList({
                     >
                       {doc.filename}
                     </span>
+                    <span className="document-list__size" aria-hidden="true">
+                      {formatSize(doc.size)}
+                    </span>
                     {onDelete && (
                       <IconButton
                         label={`Delete ${doc.filename}`}

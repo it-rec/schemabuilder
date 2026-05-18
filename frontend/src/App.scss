@@ -541,6 +541,14 @@
   overflow-wrap: anywhere;
 }
 
+// File size text sits between the filename and the delete action. Kept
+// muted and non-shrinking so it stays legible even when the filename wraps.
+.document-list__size {
+  flex-shrink: 0;
+  color: var(--cds-text-secondary, #525252);
+  @include type.type-style("helper-text-01");
+}
+
 // Delete action sits at the end of the row and never shrinks.
 .document-list__delete {
   flex-shrink: 0;
