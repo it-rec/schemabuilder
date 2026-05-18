@@ -728,6 +728,351 @@ def test_match_field_array_returns_items_structure():
     assert amount_field["match_reason"] == "decimal_format"
 
 
+def test_match_field_array_amount_ignores_date_component():
+    """A row that starts with a DD.MM.YYYY date must not have its `amount`
+    extracted as the day-month "DD.MM" — the real total ("17.43") lives at
+    the end. Regression for OnlineDoctor_Rechnung.pdf where every line item
+    started with the consultation date."""
+    table_entry = {
+        "id": 0,
+        "text": "25.03.2026 75 1 Teledermatologischer Bericht 2.3 17.43 EUR",
+        "type": "TableItem",
+        "page": 1,
+        "bbox": None,
+        "_text_lower": "25.03.2026 75 1 teledermatologischer bericht 2.3 17.43 eur",
+        "_text_stripped_lower": (
+            "25.03.2026 75 1 teledermatologischer bericht 2.3 17.43 eur"
+        ),
+    }
+    field = {
+        "name": "line_items",
+        "type": "array",
+        "fields": [{"name": "amount", "examples": ["500.00"]}],
+    }
+    result = main._match_field_to_entries(field, [table_entry], used_ids=set())
+    amount_field = result["items"][0]["fields"][0]
+    # The strict decimal regex rejects "25.03" (embedded in 25.03.2026) and
+    # "2.3" (only one fractional digit), so "17.43" — the line total — wins.
+    assert amount_field["extracted_value"] == "17.43"
+
+
+def test_match_field_array_amount_handles_european_currency_notation():
+    """Grouped-thousands amounts like "1.234,56" don't match the strict
+    decimal regex but should still be picked up via the currency-value
+    fallback so European-format line items extract correctly."""
+    table_entry = {
+        "id": 0,
+        "text": "Honorar 1.234,56 EUR",
+        "type": "TableItem",
+        "page": 1,
+        "bbox": None,
+        "_text_lower": "honorar 1.234,56 eur",
+        "_text_stripped_lower": "honorar 1.234,56 eur",
+    }
+    field = {
+        "name": "line_items",
+        "type": "array",
+        "fields": [{"name": "amount", "examples": ["500.00"]}],
+    }
+    result = main._match_field_to_entries(field, [table_entry], used_ids=set())
+    amount_field = result["items"][0]["fields"][0]
+    assert amount_field["extracted_value"] == "1.234,56"
+
+
+def test_decimal_detect_regex_rejects_date_components():
+    """Belt-and-suspenders pin on the regex itself: dates and embedded
+    sub-strings of longer numbers must not be picked up."""
+    import re as _re
+
+    rx = main._DECIMAL_DETECT_RE
+    # Dates — neither DD.MM nor MM.YYYY nor MM.YY pieces should match.
+    assert rx.search("25.03.2026") is None
+    assert rx.search("Datum 04.02.2024 wichtig") is None
+    # Numbers with grouped thousands — "1.23" inside "1.234,56" is rejected.
+    assert rx.search("1.234,56") is None
+    # Genuine money amounts continue to match.
+    assert _re.search(rx, "Total 10.72 EUR").group(0) == "10.72"
+    assert _re.search(rx, "12000.50").group(0) == "12000.50"
+    assert _re.search(rx, "amount 38.87 due").group(0) == "38.87"
+
+
+def test_column_for_subfield_resolves_synonym_quantity_to_anzahl():
+    """Default synonyms route an English sub-field name to a German column
+    header (quantity → Anzahl). No explicit pattern needed."""
+    cells = [
+        {"col": 0, "text": "25.03.2026", "header": "Datum", "bbox": None},
+        {"col": 1, "text": "1", "header": "Anzahl", "bbox": None},
+        {"col": 2, "text": "10.72", "header": "Betrag", "bbox": None},
+    ]
+    hit = main._column_for_subfield({"name": "quantity"}, cells, {})
+    assert hit is not None
+    assert hit["text"] == "1"
+    assert hit["header"] == "Anzahl"
+
+
+def test_column_for_subfield_explicit_pattern_beats_synonym_table():
+    """An explicit column_header_pattern lets the user override defaults
+    for project-specific headers."""
+    cells = [
+        {"col": 0, "text": "ALPHA", "header": "Custom-Header-A", "bbox": None},
+        {"col": 1, "text": "BETA", "header": "Custom-Header-B", "bbox": None},
+    ]
+    hit = main._column_for_subfield(
+        {"name": "irrelevant", "column_header_pattern": r"Header-B$"},
+        cells,
+        {},
+    )
+    assert hit is not None
+    assert hit["text"] == "BETA"
+
+
+def test_column_for_subfield_invalid_pattern_falls_back_to_synonyms():
+    """An invalid regex is ignored (validation already runs at upload time
+    via the Pydantic validator; this is defense in depth)."""
+    cells = [
+        {"col": 0, "text": "X", "header": "Anzahl", "bbox": None},
+    ]
+    hit = main._column_for_subfield(
+        {"name": "quantity", "column_header_pattern": "([unclosed"},
+        cells,
+        {},
+    )
+    assert hit is not None
+    assert hit["text"] == "X"
+
+
+def test_column_for_subfield_returns_none_when_no_column_matches():
+    cells = [
+        {"col": 0, "text": "x", "header": "Foo", "bbox": None},
+        {"col": 1, "text": "y", "header": "Bar", "bbox": None},
+    ]
+    assert main._column_for_subfield({"name": "amount"}, cells, {}) is None
+
+
+def test_match_field_array_routes_subfields_by_column_header():
+    """Integration: an array sub-field with a known synonym pulls its value
+    from the right column (Anzahl → quantity) and inherits the cell's own
+    tighter bbox — not the whole row's. Regression for OnlineDoctor
+    where `quantity` previously grabbed "25" from the date prefix."""
+    cells = [
+        {"col": 0, "text": "25.03.2026", "header": "Datum",
+         "bbox": {"l": 10, "t": 10, "r": 50, "b": 5}},
+        {"col": 1, "text": "75", "header": "Ziffer",
+         "bbox": {"l": 60, "t": 10, "r": 80, "b": 5}},
+        {"col": 2, "text": "1", "header": "Anzahl",
+         "bbox": {"l": 90, "t": 10, "r": 110, "b": 5}},
+        {"col": 3, "text": "Teledermatologischer Bericht", "header": "Leistung",
+         "bbox": {"l": 120, "t": 10, "r": 300, "b": 5}},
+        {"col": 4, "text": "17.43 EUR", "header": "Betrag",
+         "bbox": {"l": 310, "t": 10, "r": 360, "b": 5}},
+    ]
+    table_entry = {
+        "id": 0,
+        "text": "25.03.2026 75 1 Teledermatologischer Bericht 17.43 EUR",
+        "type": "TableItem",
+        "page": 1,
+        "bbox": {"l": 10, "t": 10, "r": 360, "b": 5},
+        "cells": cells,
+        "headers": {0: "Datum", 1: "Ziffer", 2: "Anzahl",
+                    3: "Leistung", 4: "Betrag"},
+        "_text_lower": "25.03.2026 75 1 teledermatologischer bericht 17.43 eur",
+        "_text_stripped_lower": (
+            "25.03.2026 75 1 teledermatologischer bericht 17.43 eur"
+        ),
+    }
+    field = {
+        "name": "line_items",
+        "type": "array",
+        "fields": [
+            {"name": "amount", "examples": ["500.00"]},
+            {"name": "product_code", "examples": ["SKU-123"]},
+            {"name": "quantity", "examples": ["2"]},
+        ],
+    }
+    result = main._match_field_to_entries(field, [table_entry], used_ids=set())
+    item = result["items"][0]
+    by_name = {sf["name"]: sf for sf in item["fields"]}
+    # Column-routed: each value comes from the correctly-headered column.
+    assert by_name["amount"]["extracted_value"] == "17.43 EUR"
+    assert by_name["amount"]["match_reason"] == "column_header"
+    assert by_name["amount"]["bbox"] == {"l": 310, "t": 10, "r": 360, "b": 5}
+    assert by_name["quantity"]["extracted_value"] == "1"
+    assert by_name["quantity"]["match_reason"] == "column_header"
+    assert by_name["quantity"]["bbox"] == {"l": 90, "t": 10, "r": 110, "b": 5}
+    assert by_name["product_code"]["extracted_value"] == "75"
+    assert by_name["product_code"]["match_reason"] == "column_header"
+
+
+def test_match_array_bbox_spans_full_row_when_subfields_are_cell_routed():
+    """The array-level bbox (used to highlight the whole table on hover)
+    must come from the per-item ROW bboxes, not from sub-field bboxes —
+    otherwise once sub-fields became column-routed (tight Betrag-only
+    cell bbox), the union would only outline that one column instead of
+    the full table. Regression for the user-reported "line items hover
+    only frames the amounts" bug."""
+    rows = []
+    for i, (rid, top, bot) in enumerate([(5, 200, 220), (6, 230, 250)]):
+        rows.append({
+            "id": rid,
+            "text": f"row {i}",
+            "type": "TableItem",
+            "page": 1,
+            # Row bbox spans the full table width 10..400.
+            "bbox": {"l": 10, "t": top, "r": 400, "b": bot,
+                     "coord_origin": "TOPLEFT"},
+            "cells": [
+                {"col": 0, "text": "1", "header": "Anzahl",
+                 "bbox": {"l": 60, "t": top, "r": 80, "b": bot,
+                          "coord_origin": "TOPLEFT"}},
+                {"col": 1, "text": "17.43 EUR", "header": "Betrag",
+                 # Cell bbox is tight: only 350..400 (the right edge).
+                 "bbox": {"l": 350, "t": top, "r": 400, "b": bot,
+                          "coord_origin": "TOPLEFT"}},
+            ],
+            "headers": {0: "Anzahl", 1: "Betrag"},
+            "_text_lower": f"row {i}",
+            "_text_stripped_lower": f"row {i}",
+        })
+    field = {
+        "name": "line_items", "type": "array",
+        "fields": [
+            {"name": "amount", "examples": ["500.00"]},
+            {"name": "quantity", "examples": ["2"]},
+        ],
+    }
+    result = main._match_field_to_entries(field, rows, used_ids=set())
+    bbox = result["bbox"]
+    # Spans the full width because we unioned row bboxes (10..400), not
+    # the column-routed cell bboxes (which would have collapsed to 350..400).
+    assert bbox["l"] == 10
+    assert bbox["r"] == 400
+    # Vertically covers both rows.
+    assert bbox["t"] == 200
+    assert bbox["b"] == 250
+
+
+def test_match_field_array_column_routed_subfield_gets_unique_id():
+    """A column-routed sub-field gets a synthetic cell-scoped matched_entry_id
+    ("cell:<row>:<name>"), distinct from the row's integer id, so the
+    frontend can target a cell overlay independently from the row overlay
+    (3-level hover UX: table / row / cell)."""
+    cells = [
+        {"col": 0, "text": "1", "header": "Anzahl",
+         "bbox": {"l": 60, "t": 10, "r": 80, "b": 5}},
+        {"col": 1, "text": "17.43 EUR", "header": "Betrag",
+         "bbox": {"l": 310, "t": 10, "r": 360, "b": 5}},
+    ]
+    table_entry = {
+        "id": 9,
+        "text": "1 17.43 EUR",
+        "type": "TableItem",
+        "page": 1,
+        "bbox": {"l": 10, "t": 10, "r": 360, "b": 5},
+        "cells": cells,
+        "headers": {0: "Anzahl", 1: "Betrag"},
+        "_text_lower": "1 17.43 eur",
+        "_text_stripped_lower": "1 17.43 eur",
+    }
+    field = {
+        "name": "line_items", "type": "array",
+        "fields": [
+            {"name": "amount", "examples": ["500.00"]},
+            {"name": "quantity", "examples": ["2"]},
+        ],
+    }
+    result = main._match_field_to_entries(field, [table_entry], used_ids=set())
+    item = result["items"][0]
+    by_name = {sf["name"]: sf for sf in item["fields"]}
+    # Each column-routed sub-field has a distinct synthetic id.
+    assert by_name["amount"]["matched_entry_id"] == "cell:9:amount"
+    assert by_name["quantity"]["matched_entry_id"] == "cell:9:quantity"
+    # The item itself still carries the row's integer id for row-level hover.
+    assert item["matched_entry_id"] == 9
+
+
+def test_match_field_array_regex_fallback_keeps_row_id():
+    """When the regex fallback path matches (no cells / no header for this
+    sub-field), the sub-field's matched_entry_id stays the row's integer id
+    — there's no specific cell to point at, so the row overlay activates."""
+    entry = {
+        "id": 4, "text": "Widget 100.00", "type": "TableItem",
+        "page": 1, "bbox": None,
+        "_text_lower": "widget 100.00", "_text_stripped_lower": "widget 100.00",
+    }
+    field = {
+        "name": "line_items", "type": "array",
+        "fields": [{"name": "amount", "examples": ["1.00"]}],
+    }
+    result = main._match_field_to_entries(field, [entry], used_ids=set())
+    sf = result["items"][0]["fields"][0]
+    assert sf["match_reason"] == "decimal_format"
+    assert sf["matched_entry_id"] == 4
+
+
+def test_match_field_array_items_carry_row_geometry():
+    """Each item exposes its row-level matched_entry_id / page / bbox so the
+    frontend can outline the whole line. Regression for the
+    column-routing-broke-hover bug: once sub-fields got their own (tighter)
+    cell bboxes, the frontend's "first sub-field with a bbox" fallback only
+    outlined one column."""
+    cells = [
+        {"col": 0, "text": "1", "header": "Anzahl",
+         "bbox": {"l": 60, "t": 10, "r": 80, "b": 5}},
+        {"col": 1, "text": "17.43 EUR", "header": "Betrag",
+         "bbox": {"l": 310, "t": 10, "r": 360, "b": 5}},
+    ]
+    row_bbox = {"l": 10, "t": 10, "r": 360, "b": 5}
+    table_entry = {
+        "id": 9,
+        "text": "1 17.43 EUR",
+        "type": "TableItem",
+        "page": 2,
+        "bbox": row_bbox,
+        "cells": cells,
+        "headers": {0: "Anzahl", 1: "Betrag"},
+        "_text_lower": "1 17.43 eur",
+        "_text_stripped_lower": "1 17.43 eur",
+    }
+    field = {
+        "name": "line_items",
+        "type": "array",
+        "fields": [
+            {"name": "amount", "examples": ["500.00"]},
+            {"name": "quantity", "examples": ["2"]},
+        ],
+    }
+    result = main._match_field_to_entries(field, [table_entry], used_ids=set())
+    item = result["items"][0]
+    # Row geometry, not a cell — used by the viewer to outline the whole line.
+    assert item["matched_entry_id"] == 9
+    assert item["page"] == 2
+    assert item["bbox"] == row_bbox
+
+
+def test_match_field_array_falls_back_to_regex_without_cells():
+    """Backward compat: when the table entry has no cells/headers (older
+    extraction path or non-table TableItem), regex matching still applies
+    so existing tables don't regress."""
+    entry = {
+        "id": 0,
+        "text": "Widget 5 100.00",
+        "type": "TableItem",
+        "page": 1,
+        "bbox": None,
+        "_text_lower": "widget 5 100.00",
+        "_text_stripped_lower": "widget 5 100.00",
+    }
+    field = {
+        "name": "line_items",
+        "type": "array",
+        "fields": [{"name": "amount", "examples": ["1.00"]}],
+    }
+    result = main._match_field_to_entries(field, [entry], used_ids=set())
+    sf = result["items"][0]["fields"][0]
+    assert sf["extracted_value"] == "100.00"
+    assert sf["match_reason"] == "decimal_format"
+
+
 def test_match_field_array_with_no_subfields_returns_empty_items():
     field = {"name": "rows", "type": "array", "fields": []}
     result = main._match_field_to_entries(field, [], used_ids=set())
@@ -1538,3 +1883,319 @@ def test_request_id_re_allowed_set_is_exact():
     assert not main._REQUEST_ID_RE.fullmatch("has space")
     assert not main._REQUEST_ID_RE.fullmatch("semi;colon")
     assert not main._REQUEST_ID_RE.fullmatch("with\nnewline")
+
+
+# ── _union_bboxes ───────────────────────────────────────────────────────
+
+
+def test_union_bboxes_empty_returns_none():
+    assert main._union_bboxes([]) is None
+    assert main._union_bboxes([None, None]) is None
+
+
+def test_union_bboxes_bottomleft_origin():
+    """With BOTTOMLEFT, `t` is the larger y — the union takes max(t), min(b)."""
+    a = {"l": 10, "t": 90, "r": 50, "b": 80, "coord_origin": "BOTTOMLEFT"}
+    b = {"l": 40, "t": 100, "r": 120, "b": 95, "coord_origin": "BOTTOMLEFT"}
+    out = main._union_bboxes([a, b])
+    assert out == {"l": 10, "t": 100, "r": 120, "b": 80, "coord_origin": "BOTTOMLEFT"}
+
+
+def test_union_bboxes_topleft_origin():
+    """With TOPLEFT, `t` is the smaller y — the union takes min(t), max(b)."""
+    a = {"l": 10, "t": 5, "r": 50, "b": 20, "coord_origin": "TOPLEFT"}
+    b = {"l": 40, "t": 8, "r": 120, "b": 30, "coord_origin": "TOPLEFT"}
+    out = main._union_bboxes([a, b])
+    assert out == {"l": 10, "t": 5, "r": 120, "b": 30, "coord_origin": "TOPLEFT"}
+
+
+# ── _narrow_bbox_to_substring ───────────────────────────────────────────
+
+
+def test_narrow_bbox_to_substring_trims_horizontally():
+    """A substring near the end of a single-line entry shrinks the bbox to
+    roughly that horizontal span; top/bottom are untouched."""
+    bbox = {"l": 0.0, "t": 10.0, "r": 100.0, "b": 20.0, "coord_origin": "TOPLEFT"}
+    out = main._narrow_bbox_to_substring(bbox, "abcdefghij", "ij")
+    assert out["l"] == pytest.approx(80.0)
+    assert out["r"] == pytest.approx(100.0)
+    assert out["t"] == 10.0 and out["b"] == 20.0
+
+
+def test_narrow_bbox_to_substring_skips_multiline_entries():
+    """Horizontal interpolation would misplace the box on a multi-line block,
+    so an entry with a newline is left untouched."""
+    bbox = {"l": 0.0, "t": 10.0, "r": 100.0, "b": 20.0}
+    assert main._narrow_bbox_to_substring(bbox, "line one\nline two", "two") == bbox
+
+
+def test_narrow_bbox_to_substring_safe_fallbacks():
+    bbox = {"l": 0.0, "t": 1.0, "r": 10.0, "b": 2.0}
+    # No bbox / blank value / value not present → unchanged.
+    assert main._narrow_bbox_to_substring(None, "abc", "b") is None
+    assert main._narrow_bbox_to_substring(bbox, "abc", "") == bbox
+    assert main._narrow_bbox_to_substring(bbox, "abc", "xyz") == bbox
+    # Value spans the whole entry → nothing to trim.
+    assert main._narrow_bbox_to_substring(bbox, "abc", "abc") == bbox
+
+
+# ── matcher: substring narrowing + tie-break ────────────────────────────
+
+
+def test_match_field_option_substring_narrows_value_and_bbox():
+    """An option matched as a substring returns just the option as the value,
+    and the highlight bbox is trimmed to where it sits in the entry."""
+    bbox = {"l": 0.0, "t": 10.0, "r": 100.0, "b": 20.0, "coord_origin": "TOPLEFT"}
+    result = main._match_field_to_entries(
+        {"name": "currency", "available_options": ["EUR"]},
+        [_entry(0, "Total amount 38.87 EUR", bbox=bbox)],
+        used_ids=set(),
+    )
+    assert result["match_reason"] == "option_substring"
+    assert result["extracted_value"] == "EUR"
+    # "EUR" is the last 3 of 22 chars → bbox trimmed to the right edge.
+    assert result["bbox"]["l"] > 50.0
+    assert result["bbox"]["r"] == pytest.approx(100.0)
+
+
+def test_match_field_option_substring_ties_break_to_shorter_entry():
+    """On a score tie between two option-substring hits, the shorter (tighter)
+    entry wins — so currency matches "Gesamtbetrag 38.87 EUR", not a long
+    sentence that merely mentions EUR."""
+    long_entry = _entry(
+        0, "For services rendered we charge the amount of 38.87 EUR total"
+    )
+    short_entry = _entry(1, "Gesamtbetrag 38.87 EUR")
+    result = main._match_field_to_entries(
+        {"name": "currency", "available_options": ["EUR"]},
+        [long_entry, short_entry],
+        used_ids=set(),
+    )
+    assert result["matched_entry_id"] == 1
+
+
+def test_match_field_collects_additional_bboxes_for_repeated_token():
+    """A currency code typically appears multiple times in an invoice. The
+    matcher returns the best entry as primary, plus every *other* entry
+    containing the same token in `additional_bboxes` so the UI can outline
+    every "EUR" at once on hover."""
+    primary = _entry(
+        0,
+        "Gesamtbetrag 38.87 EUR",
+        page=1,
+        bbox={"l": 0.0, "t": 10.0, "r": 100.0, "b": 20.0, "coord_origin": "TOPLEFT"},
+    )
+    extra1 = _entry(
+        1,
+        "Konsultation 12.50 EUR",
+        page=1,
+        bbox={"l": 0.0, "t": 30.0, "r": 80.0, "b": 40.0, "coord_origin": "TOPLEFT"},
+    )
+    extra2 = _entry(
+        2,
+        "Versand 3.00 EUR",
+        page=2,
+        bbox={"l": 5.0, "t": 5.0, "r": 65.0, "b": 15.0, "coord_origin": "TOPLEFT"},
+    )
+    result = main._match_field_to_entries(
+        {"name": "currency", "available_options": ["EUR"]},
+        [primary, extra1, extra2],
+        used_ids=set(),
+    )
+    assert result["extracted_value"] == "EUR"
+    # On a tie among option_substring hits the shortest entry wins — here
+    # extra2 ("Versand 3.00 EUR", 16 chars) beats the two longer entries.
+    assert result["matched_entry_id"] == 2
+    add = result["additional_bboxes"]
+    # The two non-primary entries both contain "EUR" → both included.
+    assert len(add) == 2
+    pages = sorted(a["page"] for a in add)
+    assert pages == [1, 1]
+    for a in add:
+        # narrowed to the EUR span — strictly inside the entry's bbox width.
+        assert a["bbox"]["r"] > a["bbox"]["l"]
+
+
+def test_match_field_skips_multiline_entries_for_additional_bboxes():
+    """Multi-line entries cannot be narrowed horizontally without misplacing
+    the box, so they must not be added to additional_bboxes."""
+    primary = _entry(
+        0,
+        "EUR",
+        page=1,
+        bbox={"l": 0.0, "t": 0.0, "r": 30.0, "b": 10.0, "coord_origin": "TOPLEFT"},
+    )
+    multiline = _entry(
+        1,
+        "Line one\nThis line has EUR mid-text\nLine three",
+        page=1,
+        bbox={"l": 0.0, "t": 20.0, "r": 400.0, "b": 60.0, "coord_origin": "TOPLEFT"},
+    )
+    result = main._match_field_to_entries(
+        {"name": "currency", "available_options": ["EUR"]},
+        [primary, multiline],
+        used_ids=set(),
+    )
+    assert result["additional_bboxes"] == []
+
+
+def test_match_field_no_additional_bboxes_for_decimal_format():
+    """decimal_format treats the entire entry as the value, not a token —
+    so additional_bboxes must stay empty even if many entries contain the
+    same digit sequence."""
+    entries = [
+        _entry(0, "100.00", bbox={"l": 0.0, "t": 0.0, "r": 50.0, "b": 10.0}),
+        _entry(1, "100.00", bbox={"l": 0.0, "t": 20.0, "r": 50.0, "b": 30.0}),
+    ]
+    result = main._match_field_to_entries(
+        {"name": "amount", "examples": ["50.00"]},
+        entries,
+        used_ids=set(),
+    )
+    # Sanity: decimal_format won here.
+    assert result["match_reason"] == "decimal_format"
+    assert result["additional_bboxes"] == []
+
+
+def test_match_field_date_format_recognises_german_date():
+    """A DD.MM.YYYY date like "25.03.2026" must score 85 (date_format)
+    even when the only example given is ISO ("2024-02-04"). Before the
+    multi-format extension, the German date fell through and invoice_date
+    came back empty on OnlineDoctor_Rechnung.pdf."""
+    result = main._match_field_to_entries(
+        {"name": "invoice_date", "examples": ["2024-02-04"]},
+        [_entry(0, "Rechnungsdatum: 25.03.2026")],
+        used_ids=set(),
+    )
+    assert result["match_reason"] == "date_format"
+    assert result["match_score"] == 85
+    assert result["extracted_value"] == "25.03.2026"
+
+
+def test_match_field_date_format_narrows_bbox_to_date_span():
+    """The date span ("25.03.2026") is what we point at, not the whole
+    "Rechnungsdatum: …" entry, so the document overlay sits cleanly on
+    the date itself."""
+    bbox = {"l": 0.0, "t": 10.0, "r": 100.0, "b": 0.0, "coord_origin": "TOPLEFT"}
+    # 26 chars total, "25.03.2026" is the trailing 10. Narrowing should put
+    # `l` well past the midpoint and leave `r` at the right edge.
+    result = main._match_field_to_entries(
+        {"name": "invoice_date", "examples": ["2024-02-04"]},
+        [_entry(0, "Rechnungsdatum: 25.03.2026", bbox=bbox)],
+        used_ids=set(),
+    )
+    assert result["match_reason"] == "date_format"
+    assert result["bbox"]["l"] > 50.0
+    assert result["bbox"]["r"] == pytest.approx(100.0)
+
+
+def test_match_field_date_format_accepts_us_slash_format():
+    result = main._match_field_to_entries(
+        {"name": "invoice_date", "examples": ["2024-02-04"]},
+        [_entry(0, "Issued on 03/25/2026 by ACME")],
+        used_ids=set(),
+    )
+    assert result["match_reason"] == "date_format"
+    assert result["extracted_value"] == "03/25/2026"
+
+
+def test_date_detect_head_rejects_embedded_decimals():
+    """Pin: the date regex must not pick up "1.23" or "1.2.3"-style fragments
+    as dates — only date-shaped tokens flanked by non-date characters."""
+    rx = main._DATE_DETECT_HEAD_RE
+    assert rx.search("1.23") is None       # decimal, not a date
+    assert rx.search("ver 1.2") is None     # version, missing trailing yyyy
+    # A real date still fires on a TableItem row that prefixes one.
+    assert rx.search("25.03.2026 Beratung 10.72 EUR").group(0) == "25.03.2026"
+
+
+def test_match_field_example_substring_narrows_value_and_bbox():
+    """An example matched as a substring returns just the example as the value,
+    and the bbox is trimmed to its span. Critical for currency_sign fields
+    (examples=["$", "€"]) when the symbol sits inside a longer sentence —
+    otherwise the overlay covers the whole paragraph."""
+    bbox = {"l": 0.0, "t": 10.0, "r": 100.0, "b": 20.0, "coord_origin": "TOPLEFT"}
+    result = main._match_field_to_entries(
+        {"name": "currency_sign", "examples": ["$", "€"]},
+        [_entry(0, "Gesamtbetrag 38.87 €", bbox=bbox)],
+        used_ids=set(),
+    )
+    assert result["match_reason"] == "example_substring"
+    assert result["extracted_value"] == "€"
+    # "€" is the final char of a 22-char string → bbox shrinks to the right edge.
+    assert result["bbox"]["l"] > 80.0
+    assert result["bbox"]["r"] == pytest.approx(100.0)
+
+
+def test_match_field_example_substring_preserves_original_case():
+    """Examples are lowercased internally for matching, but the value we keep
+    must come from the original-cased text so users see "Premium", not
+    "premium"."""
+    result = main._match_field_to_entries(
+        {"name": "tier", "examples": ["premium"]},
+        [_entry(0, "Plan: Premium subscription")],
+        used_ids=set(),
+    )
+    assert result["match_reason"] == "example_substring"
+    assert result["extracted_value"] == "Premium"
+
+
+def test_match_field_pattern_match_narrows_bbox():
+    """pattern_match already narrows extracted_value; the bbox follows suit."""
+    bbox = {"l": 0.0, "t": 0.0, "r": 200.0, "b": 10.0, "coord_origin": "TOPLEFT"}
+    result = main._match_field_to_entries(
+        {"name": "iban", "pattern": r"\b[A-Z]{2}\d{20}\b"},
+        [_entry(0, "Pay to DE89370400440532013000 now", bbox=bbox)],
+        used_ids=set(),
+    )
+    assert result["extracted_value"] == "DE89370400440532013000"
+    # Narrowed to a sub-span — strictly inside the original [0, 200].
+    assert result["bbox"]["l"] > 0.0
+    assert result["bbox"]["r"] < 200.0
+
+
+# ── _match_field_to_entries: array field table geometry ─────────────────
+
+
+def test_match_array_field_result_unions_row_bboxes():
+    """The array field result carries a table-level bbox (union of its item
+    rows) and a synthetic, collision-proof matched_entry_id so hovering the
+    field outlines the whole table."""
+    field = {
+        "name": "line_items", "type": "array",
+        "fields": [{"name": "amount", "examples": ["1.00"]}],
+    }
+    rows = [
+        {"id": 0, "text": "Widget 100.00", "type": "TableItem", "page": 1,
+         "bbox": {"l": 10, "t": 90, "r": 200, "b": 80, "coord_origin": "BOTTOMLEFT"},
+         "_text_lower": "widget 100.00", "_text_stripped_lower": "widget 100.00"},
+        {"id": 1, "text": "Gadget 250.00", "type": "TableItem", "page": 1,
+         "bbox": {"l": 10, "t": 78, "r": 200, "b": 68, "coord_origin": "BOTTOMLEFT"},
+         "_text_lower": "gadget 250.00", "_text_stripped_lower": "gadget 250.00"},
+    ]
+    result = main._match_field_to_entries(field, rows, used_ids=set())
+    assert len(result["items"]) == 2
+    assert result["matched_entry_id"] == "array:line_items"
+    assert result["page"] == 1
+    assert result["bbox"] == {
+        "l": 10, "t": 90, "r": 200, "b": 68, "coord_origin": "BOTTOMLEFT"
+    }
+
+
+def test_match_array_field_result_no_bbox_when_rows_lack_geometry():
+    """Rows without bboxes leave the array field's matched_entry_id/bbox null —
+    no synthetic id is invented for a table we can't place."""
+    field = {
+        "name": "line_items", "type": "array",
+        "fields": [{"name": "amount", "examples": ["1.00"]}],
+    }
+    rows = [
+        {"id": 0, "text": "Widget 100.00", "type": "TableItem", "page": 1,
+         "bbox": None, "_text_lower": "widget 100.00",
+         "_text_stripped_lower": "widget 100.00"},
+    ]
+    result = main._match_field_to_entries(field, rows, used_ids=set())
+    assert len(result["items"]) == 1
+    assert result["matched_entry_id"] is None
+    assert result["bbox"] is None
+    assert result["page"] is None

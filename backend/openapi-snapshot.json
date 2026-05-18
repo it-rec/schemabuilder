@@ -143,6 +143,17 @@
             ],
             "title": "Available Options"
           },
+          "column_header_pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Header Pattern"
+          },
           "description": {
             "anyOf": [
               {

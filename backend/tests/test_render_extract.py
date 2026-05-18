@@ -594,6 +594,119 @@ def test_extract_text_iterate_items_can_yield_tuples(monkeypatch, tmp_path):
     assert entries[0]["text"] == "from-tuple"
 
 
+# ── _extract_text: TableItem → per-row entries ──────────────────────────
+
+
+class _TableCell:
+    def __init__(self, text, row, col, bbox=None, column_header=False):
+        self.text = text
+        self.start_row_offset_idx = row
+        self.end_row_offset_idx = row + 1
+        self.start_col_offset_idx = col
+        self.end_col_offset_idx = col + 1
+        self.bbox = bbox
+        self.column_header = column_header
+
+
+class _TableData:
+    def __init__(self, cells):
+        self.table_cells = cells
+
+
+class TableItem:  # noqa: N801 — class name must match Docling's for the
+    # `type(item).__name__ == "TableItem"` detection in _extract_text.
+    def __init__(self, cells, page=1):
+        self.data = _TableData(cells)
+        self.prov = [_Prov(page)]
+
+    def export_to_markdown(self):
+        return "| whole | table |"
+
+
+def test_extract_text_splits_table_into_rows(monkeypatch, tmp_path):
+    """A Docling TableItem is emitted as one entry per data row — each typed
+    "TableItem", with its own row-level bbox — instead of one whole-table
+    blob. The column-header row is dropped."""
+    cells = [
+        # header row — skipped (all cells column_header)
+        _TableCell("Item", 0, 0, _Bbox(10, 95, 50, 100), column_header=True),
+        _TableCell("Amount", 0, 1, _Bbox(60, 95, 100, 100), column_header=True),
+        # data row 1
+        _TableCell("Widget", 1, 0, _Bbox(10, 85, 50, 90)),
+        _TableCell("100.00", 1, 1, _Bbox(60, 85, 100, 90)),
+        # data row 2
+        _TableCell("Gadget", 2, 0, _Bbox(10, 75, 50, 80)),
+        _TableCell("250.00", 2, 1, _Bbox(60, 75, 100, 80)),
+    ]
+    doc = _FakeDoclingDoc([TableItem(cells, page=1)], {1: (612.0, 792.0)})
+    monkeypatch.setitem(main._text_converters, False, _FakeConverter(doc))
+    monkeypatch.setattr(main, "_resolve_ocr_decision", lambda _p: False)
+
+    entries, _ = main._extract_text(tmp_path / "tbl.pdf")
+
+    assert [e["text"] for e in entries] == ["Widget 100.00", "Gadget 250.00"]
+    assert all(e["type"] == "TableItem" for e in entries)
+    assert all(e["page"] == 1 for e in entries)
+    # Ids are assigned sequentially across the split rows.
+    assert [e["id"] for e in entries] == [0, 1]
+    # Row bbox is the union of its cells — spans both columns of row 1.
+    assert entries[0]["bbox"]["l"] == 10.0
+    assert entries[0]["bbox"]["r"] == 100.0
+    assert entries[0]["bbox"]["coord_origin"] == "BOTTOMLEFT"
+
+
+def test_extract_text_table_preserves_cells_and_headers(monkeypatch, tmp_path):
+    """Each row entry exposes per-cell text+bbox and the table-wide column
+    headers, so array sub-fields can route to a specific column instead of
+    regex-scanning the joined row text."""
+    cells = [
+        _TableCell("Datum", 0, 0, _Bbox(10, 95, 50, 100), column_header=True),
+        _TableCell("Anzahl", 0, 1, _Bbox(60, 95, 100, 100), column_header=True),
+        _TableCell("Betrag", 0, 2, _Bbox(110, 95, 150, 100), column_header=True),
+        _TableCell("25.03.2026", 1, 0, _Bbox(10, 85, 50, 90)),
+        _TableCell("1", 1, 1, _Bbox(60, 85, 100, 90)),
+        _TableCell("10.72 EUR", 1, 2, _Bbox(110, 85, 150, 90)),
+    ]
+    doc = _FakeDoclingDoc([TableItem(cells, page=1)], {1: (612.0, 792.0)})
+    monkeypatch.setitem(main._text_converters, False, _FakeConverter(doc))
+    monkeypatch.setattr(main, "_resolve_ocr_decision", lambda _p: False)
+
+    entries, _ = main._extract_text(tmp_path / "tbl.pdf")
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["headers"] == {0: "Datum", 1: "Anzahl", 2: "Betrag"}
+    cells_out = e["cells"]
+    assert len(cells_out) == 3
+    by_col = {c["col"]: c for c in cells_out}
+    assert by_col[0]["text"] == "25.03.2026"
+    assert by_col[0]["header"] == "Datum"
+    assert by_col[1]["text"] == "1"
+    assert by_col[1]["header"] == "Anzahl"
+    assert by_col[2]["text"] == "10.72 EUR"
+    assert by_col[2]["header"] == "Betrag"
+    # Each cell carries its own bbox (much tighter than the row's union bbox).
+    assert by_col[2]["bbox"]["l"] == 110.0
+    assert by_col[2]["bbox"]["r"] == 150.0
+
+
+def test_extract_text_table_without_cell_data_falls_back_to_markdown(
+    monkeypatch, tmp_path
+):
+    """A TableItem carrying no usable cell data falls back to the whole-table
+    markdown entry — no regression for backends that don't expose cells."""
+    item = TableItem([], page=1)
+    item.data = None  # simulate missing structured data
+    doc = _FakeDoclingDoc([item], {1: (10, 10)})
+    monkeypatch.setitem(main._text_converters, False, _FakeConverter(doc))
+    monkeypatch.setattr(main, "_resolve_ocr_decision", lambda _p: False)
+
+    entries, _ = main._extract_text(tmp_path / "tbl2.pdf")
+
+    assert len(entries) == 1
+    assert entries[0]["text"] == "| whole | table |"
+    assert entries[0]["type"] == "TableItem"
+
+
 def test_extract_text_docx_runs_on_converted_pdf(monkeypatch, tmp_path):
     """DOCX/PPTX text extraction must route through _convert_to_pdf so Docling's
     PDF backend (not the SimplePipeline) processes the file. Otherwise prov

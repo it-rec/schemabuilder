@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useCallback } from "react";
 import {
   Button,
+  IconButton,
   OverflowMenu,
   OverflowMenuItem,
   Tag,
@@ -14,6 +15,7 @@ import {
   ChevronRight,
   Information,
   MagicWand,
+  Renew,
 } from "@carbon/react/icons";
 
 const ConfidenceIndicator = React.memo(function ConfidenceIndicator({ confidence }) {
@@ -138,6 +140,89 @@ function formatNormalized(value) {
   if (typeof value === "boolean") return value ? "true" : "false";
   return String(value);
 }
+
+// One row of an array field. Both the header ("Item 1") and each
+// sub-field row are independently hoverable so the user gets the
+// three-level granularity: table (handled by the parent FieldItem),
+// row (this header), cell (each SubFieldRow). The header hover
+// payload uses the item's row-level matched_entry_id so the document
+// viewer activates the row-bbox overlay, not a cell.
+const ArrayItem = React.memo(function ArrayItem({
+  parentName,
+  index,
+  item,
+  onHoverField,
+  highlightedEntryId,
+}) {
+  const itemFieldPayload = useMemo(
+    () =>
+      item.matched_entry_id != null
+        ? {
+            name: `${parentName}[${index}]`,
+            matched_entry_id: item.matched_entry_id,
+            page: item.page,
+            bbox: item.bbox,
+          }
+        : null,
+    [parentName, index, item.matched_entry_id, item.page, item.bbox],
+  );
+  const handleHeaderEnter = useCallback(() => {
+    if (itemFieldPayload) onHoverField(itemFieldPayload);
+  }, [itemFieldPayload, onHoverField]);
+  const handleHeaderLeave = useCallback(
+    () => onHoverField(null),
+    [onHoverField],
+  );
+
+  const isItemHighlighted =
+    item.matched_entry_id != null &&
+    highlightedEntryId === item.matched_entry_id;
+
+  return (
+    <div className="fields-panel__array-item">
+      <div
+        className={
+          "fields-panel__array-item-header" +
+          (itemFieldPayload
+            ? " fields-panel__array-item-header--hoverable"
+            : "") +
+          (isItemHighlighted
+            ? " fields-panel__array-item-header--highlighted"
+            : "")
+        }
+        onMouseEnter={handleHeaderEnter}
+        onMouseLeave={handleHeaderLeave}
+        onFocus={handleHeaderEnter}
+        onBlur={handleHeaderLeave}
+        tabIndex={itemFieldPayload ? 0 : -1}
+        role={itemFieldPayload ? "button" : undefined}
+        aria-label={
+          itemFieldPayload
+            ? `Highlight ${parentName} item ${index + 1}`
+            : undefined
+        }
+        data-testid={`array-item-header-${parentName}-${index}`}
+      >
+        Item {index + 1}
+      </div>
+      <ul className="fields-panel__array-item-fields">
+        {item.fields.map((subField) => (
+          <SubFieldRow
+            key={subField.name}
+            parentName={parentName}
+            index={index}
+            subField={subField}
+            onHoverField={onHoverField}
+            highlighted={
+              highlightedEntryId != null &&
+              subField.matched_entry_id === highlightedEntryId
+            }
+          />
+        ))}
+      </ul>
+    </div>
+  );
+});
 
 const FieldItem = React.memo(function FieldItem({
   field,
@@ -336,26 +421,14 @@ const FieldItem = React.memo(function FieldItem({
         <div className="fields-panel__array-items">
           {hasItems ? (
             field.items.map((item, idx) => (
-              <div key={idx} className="fields-panel__array-item">
-                <div className="fields-panel__array-item-header">
-                  Item {idx + 1}
-                </div>
-                <ul className="fields-panel__array-item-fields">
-                  {item.fields.map((subField) => (
-                    <SubFieldRow
-                      key={subField.name}
-                      parentName={field.name}
-                      index={idx}
-                      subField={subField}
-                      onHoverField={onHoverField}
-                      highlighted={
-                        highlightedEntryId != null &&
-                        subField.matched_entry_id === highlightedEntryId
-                      }
-                    />
-                  ))}
-                </ul>
-              </div>
+              <ArrayItem
+                key={idx}
+                parentName={field.name}
+                index={idx}
+                item={item}
+                onHoverField={onHoverField}
+                highlightedEntryId={highlightedEntryId}
+              />
             ))
           ) : (
             <p className="fields-panel__array-empty">No items found.</p>
@@ -370,6 +443,7 @@ export default function FieldsPanel({
   extraction,
   onHoverField,
   onExport,
+  onRefresh,
   highlightedField,
   loading,
   // Empty-state guidance. When no extraction is available the panel
@@ -500,6 +574,17 @@ export default function FieldsPanel({
           <Tag size="sm" type={matchedCount > 0 ? "green" : "gray"}>
             {matchedCount}/{fields.length} found
           </Tag>
+          {onRefresh && (
+            <IconButton
+              label="Re-extract (bypass cache)"
+              kind="ghost"
+              size="sm"
+              onClick={onRefresh}
+              data-testid="fields-panel-refresh"
+            >
+              <Renew />
+            </IconButton>
+          )}
           {onExport && tableNames.length > 0 && (
             <OverflowMenu
               size="sm"

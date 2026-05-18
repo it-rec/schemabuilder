@@ -274,6 +274,72 @@ test("teach targets for already-matched entries are pointer-events disabled", ()
   );
 });
 
+test("additional overlays for the same field share active state, suppress duplicate label", () => {
+  // Three overlays for one field (a currency code repeating across the doc).
+  // All share matched_entry_id, so highlighting the field must light up
+  // every overlay — but only the primary gets the label so the page isn't
+  // littered with N copies of the same caption.
+  const field = { name: "currency", matched_entry_id: 7 };
+  const extractedFields = [
+    {
+      key: "field.currency",
+      label: "currency",
+      isPrimary: true,
+      matched_entry_id: 7,
+      page: 1,
+      bbox: { l: 50, t: 700, r: 80, b: 680, coord_origin: "BOTTOMLEFT" },
+      field,
+    },
+    {
+      key: "field.currency.add.0",
+      label: "currency",
+      isPrimary: false,
+      matched_entry_id: 7,
+      page: 1,
+      bbox: { l: 50, t: 600, r: 80, b: 580, coord_origin: "BOTTOMLEFT" },
+      field,
+    },
+    {
+      key: "field.currency.add.1",
+      label: "currency",
+      isPrimary: false,
+      matched_entry_id: 7,
+      page: 1,
+      bbox: { l: 50, t: 500, r: 80, b: 480, coord_origin: "BOTTOMLEFT" },
+      field,
+    },
+  ];
+
+  render(
+    <DocumentViewer
+      docId="abc"
+      documentData={mockDocData}
+      highlightedField={field}
+      onHoverField={() => {}}
+      extractedFields={extractedFields}
+      loading={false}
+    />,
+  );
+  loadImage(screen.getByAltText(/page 1 of 3/i));
+
+  // All three overlays activate together (they share matched_entry_id).
+  // The primary is queryable by the bare data-testid; the additional
+  // overlays use their distinct keys.
+  expect(screen.getByTestId("highlight-overlay")).toHaveClass(
+    "document-viewer__highlight--active",
+  );
+  expect(
+    screen.getByTestId("highlight-overlay-field.currency.add.0"),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByTestId("highlight-overlay-field.currency.add.1"),
+  ).toBeInTheDocument();
+  // Only one "currency" label is rendered, even though three overlays are
+  // active — the additional ones suppress their label.
+  expect(screen.getAllByText("currency")).toHaveLength(1);
+});
+
+
 test("active overlay carries the active class and label", () => {
   const field = { name: "invoice_id", matched_entry_id: 1 };
   const extractedFields = [

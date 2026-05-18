@@ -1,6 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef } from "react";
 import {
-  Button,
   IconButton,
   Search,
   StructuredListWrapper,
@@ -87,46 +86,47 @@ export default function DocumentList({
         >
           Documents
         </h2>
-        {onUpload && (
-          <>
-            <Button
+        <div className="document-list__heading-actions">
+          {onUpload && (
+            <>
+              <IconButton
+                label={uploading ? "Uploading…" : "Upload documents"}
+                kind="ghost"
+                size="sm"
+                onClick={handleUploadClick}
+                disabled={!!uploading}
+                data-testid="upload-button"
+              >
+                <Upload />
+              </IconButton>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.docx,.pptx"
+                multiple
+                onChange={handleFilesPicked}
+                style={{ display: "none" }}
+                data-testid="upload-input"
+              />
+            </>
+          )}
+          {onRunBatch && (
+            <IconButton
+              label={
+                filtered.length === documents.length
+                  ? `Run extraction on all ${documents.length} documents`
+                  : `Run extraction on the ${filtered.length} visible documents`
+              }
               kind="ghost"
               size="sm"
-              renderIcon={Upload}
-              onClick={handleUploadClick}
-              disabled={!!uploading}
-              data-testid="upload-button"
+              onClick={() => onRunBatch(filtered)}
+              disabled={filtered.length === 0}
+              data-testid="batch-run-button"
             >
-              {uploading ? "Uploading…" : "Upload"}
-            </Button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,.docx,.pptx"
-              multiple
-              onChange={handleFilesPicked}
-              style={{ display: "none" }}
-              data-testid="upload-input"
-            />
-          </>
-        )}
-        {onRunBatch && (
-          <Button
-            kind="ghost"
-            size="sm"
-            renderIcon={Play}
-            onClick={() => onRunBatch(filtered)}
-            disabled={filtered.length === 0}
-            data-testid="batch-run-button"
-            title={
-              filtered.length === documents.length
-                ? `Run extraction on all ${documents.length} documents`
-                : `Run extraction on the ${filtered.length} visible documents`
-            }
-          >
-            Run all
-          </Button>
-        )}
+              <Play />
+            </IconButton>
+          )}
+        </div>
       </div>
       <Search
         size="md"
@@ -142,7 +142,6 @@ export default function DocumentList({
         <StructuredListHead>
           <StructuredListRow head>
             <StructuredListCell head>Document</StructuredListCell>
-            <StructuredListCell head>Size</StructuredListCell>
           </StructuredListRow>
         </StructuredListHead>
         <StructuredListBody>
@@ -170,12 +169,15 @@ export default function DocumentList({
                 <StructuredListCell>
                   <span className="document-list__name">
                     <Icon size={20} aria-hidden="true" />
-                    <span>{doc.filename}</span>
-                  </span>
-                </StructuredListCell>
-                <StructuredListCell>
-                  <span className="document-list__size-row">
-                    <span>{formatSize(doc.size)}</span>
+                    <span
+                      className="document-list__name-text"
+                      title={doc.filename}
+                    >
+                      {doc.filename}
+                    </span>
+                    <span className="document-list__size" aria-hidden="true">
+                      {formatSize(doc.size)}
+                    </span>
                     {onDelete && (
                       <IconButton
                         label={`Delete ${doc.filename}`}
@@ -183,6 +185,7 @@ export default function DocumentList({
                         size="sm"
                         onClick={(e) => handleDelete(doc, e)}
                         data-testid={`doc-delete-${doc.id}`}
+                        wrapperClasses="document-list__delete"
                       >
                         <TrashCan />
                       </IconButton>
@@ -194,7 +197,7 @@ export default function DocumentList({
           })}
           {filtered.length === 0 && (
             <StructuredListRow>
-              <StructuredListCell colSpan={2}>
+              <StructuredListCell>
                 No documents found.
               </StructuredListCell>
             </StructuredListRow>
