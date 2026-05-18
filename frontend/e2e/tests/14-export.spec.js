@@ -11,6 +11,9 @@ import {
 
 // A definition with `target_tables` so the FieldsPanel renders its export
 // OverflowMenu (the menu is hidden when no tables are declared).
+// `target_tables` lives at the top of the JSON, NOT inside `document` —
+// the backend reads `definition.target_tables`, not `definition.document.
+// target_tables`. The matching invoice.json fixture has the same shape.
 const EXPORT_DEF_ID = "export_test";
 const exportDef = {
   document: {
@@ -20,21 +23,21 @@ const exportDef = {
       { name: "title", description: "Document title" },
       { name: "amount", description: "Amount", normalizer: "currency" },
     ],
-    target_tables: [
-      {
-        name: "Summary",
-        columns: [
-          {
-            name: "doc_id",
-            type: "string",
-            source: { variable: "document_id" },
-          },
-          { name: "title", type: "string", source: { field: "title" } },
-          { name: "amount", type: "number", source: { field: "amount" } },
-        ],
-      },
-    ],
   },
+  target_tables: [
+    {
+      name: "Summary",
+      columns: [
+        {
+          name: "doc_id",
+          type: "string",
+          source: { variable: "document_id" },
+        },
+        { name: "title", type: "string", source: { field: "title" } },
+        { name: "amount", type: "number", source: { field: "amount" } },
+      ],
+    },
+  ],
 };
 
 test.beforeEach(async ({ request }) => {
