@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Button,
   ComposedModal,
@@ -62,14 +62,18 @@ export default function ExampleTeacher({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  // Reset selection whenever the modal reopens with a new entry — otherwise
-  // a "stale" selection from the previous open lingers.
-  React.useEffect(() => {
-    if (open) {
-      setSelected(defaultPath);
-      setError(null);
-    }
-  }, [open, defaultPath, entry?.text]);
+  // Reset selection if the modal re-renders against a new entry (or the
+  // extraction-derived default flips while it's open). Done during render
+  // via the "store previous prop" pattern so the reset rides the same
+  // commit that surfaced the new prop, with no intervening flash.
+  const [prevEntryText, setPrevEntryText] = useState(entry?.text);
+  const [prevDefaultPath, setPrevDefaultPath] = useState(defaultPath);
+  if (entry?.text !== prevEntryText || defaultPath !== prevDefaultPath) {
+    setPrevEntryText(entry?.text);
+    setPrevDefaultPath(defaultPath);
+    setSelected(defaultPath);
+    setError(null);
+  }
 
   const handleSave = useCallback(async () => {
     if (!selected || !entry?.text || !definitionId) return;
