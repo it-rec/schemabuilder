@@ -273,11 +273,6 @@ export default function App() {
   useEffect(() => {
     if (!selectedDocId || !selectedDefId || !documentData || online !== true) return;
     const ctrl = new AbortController();
-    setExtracting(true);
-    setExtraction(null);
-    // Drop any field highlight from the prior definition; its bbox refers to
-    // a field object that no longer exists in the new extraction.
-    setHighlightedField(null);
     const refresh = pendingExtractRefreshRef.current;
     pendingExtractRefreshRef.current = false;
     extractFields(selectedDocId, selectedDefId, {
