@@ -1,0 +1,20 @@
+diff --git a/node_modules/eslint-plugin-react/lib/util/version.js b/node_modules/eslint-plugin-react/lib/util/version.js
+index c9dc683..ace53cf 100644
+--- a/node_modules/eslint-plugin-react/lib/util/version.js
++++ b/node_modules/eslint-plugin-react/lib/util/version.js
+@@ -28,7 +28,14 @@ function resetDetectedVersion() {
+ 
+ function resolveBasedir(contextOrFilename) {
+   if (contextOrFilename) {
+-    const filename = typeof contextOrFilename === 'string' ? contextOrFilename : contextOrFilename.getFilename();
++    const filename = typeof contextOrFilename === 'string'
++      ? contextOrFilename
++      // ESLint 10 dropped `context.getFilename()`; the `.filename` property
++      // has been the preferred API since 8.40 and is the only one that
++      // works on v10. Keep the `.getFilename()` fallback for older hosts.
++      : typeof contextOrFilename.filename === 'string'
++        ? contextOrFilename.filename
++        : contextOrFilename.getFilename();
+     const dirname = path.dirname(filename);
+     try {
+       if (fs.statSync(filename).isFile()) {
