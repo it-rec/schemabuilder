@@ -189,6 +189,55 @@ and `VITE_API_TIMEOUT_MS` (see `src/services/api.js`). If you add another and
 forget the `VITE_` prefix, Vite silently drops it and you'll get `undefined`
 at runtime — there is no helpful error.
 
+### Playwright E2E suite
+
+End-to-end tests live in `frontend/e2e/`. Unlike the vitest suite, they
+run against a **real** FastAPI backend (with real Docling) and a real Vite
+dev server. Playwright orchestrates both via its `webServer` config.
+
+```bash
+cd frontend
+# One-time setup on a fresh checkout. Pulls Chromium + apt deps.
+npm run test:e2e:install
+# Backend: also needs the full requirements.txt (real Docling), not the
+# slim lint-only install above. From repo root:
+pip install -r backend/requirements.txt
+
+# Run the suite (starts backend on :8765 + vite on :3000, then runs tests).
+npm run test:e2e
+# Interactive UI mode for debugging an individual test.
+npm run test:e2e:ui
+```
+
+Key design choices:
+- **Isolated state.** The E2E backend reads `SCHEMABUILDER_TEST_DOCS_DIR`
+  and `SCHEMABUILDER_DEFINITIONS_DIR` (added to `backend/main.py` for this
+  purpose) and points them at `frontend/playwright/.tmp/`, gitignored. The
+  checked-in `backend/test_documents/` / `backend/definitions/` are never
+  touched by the suite.
+- **Seeded baseline.** `e2e/global-setup.js` writes one `sample.pdf` and
+  one `Seed Definition` so most tests can start with a usable state.
+  Helpers in `e2e/helpers.js` reset to that baseline between tests.
+- **Sequential workers.** `workers: 1` in `playwright.config.js` — most
+  tests mutate shared backend state, so parallel runs would fight.
+- **No real LLM.** `ANTHROPIC_API_KEY` is force-set to "" for the E2E
+  backend, so the `/suggest-definition` endpoint returns a deterministic
+  503 instead of depending on whichever key happens to be in the env.
+- **OCR disabled.** `DOCLING_DO_OCR=0` keeps extraction on the fast
+  pypdfium2 path. The bundled sample is digital, so OCR isn't needed.
+
+CI runs a dedicated `e2e` job in `.github/workflows/ci.yml` that gates on
+the other jobs first (a typo in eslint shouldn't burn 5 min installing
+torch). The job uploads `playwright-report/` and `test-results/` as
+artifacts on every run for post-mortem on flaky tests.
+
+> ⚠️ The E2E job installs the **full** `backend/requirements.txt`
+> (Docling + torch), unlike the lean `backend` job. Expect 3-5 min of
+> install time on a cold cache. If a new transitive isn't picked up by
+> requirements.txt and the E2E backend fails to import, it's likely the
+> same kind of drift documented for the lean install — add the dep to
+> requirements.txt (not just CLAUDE.md).
+
 ---
 
 ## GitHub Pages site (`docs/`)

@@ -43,5 +43,9 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/setupTests.js"],
     css: false,
+    // Playwright owns everything under e2e/. Vitest's default include picks
+    // up *.spec.js too, which would try to import @playwright/test in a
+    // jsdom environment and fail at collection time.
+    exclude: ["node_modules/**", "build/**", "e2e/**"],
   },
 });
