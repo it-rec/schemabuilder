@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Checkbox,
@@ -635,7 +635,9 @@ export default function DefinitionEditor({
     fields: [],
   });
   const [original, setOriginal] = useState(null);
-  const [loading, setLoading] = useState(false);
+  // Edit mode always fetches on mount, so start in the loading state to
+  // avoid a synchronous setLoading(true) inside the hydrate effect.
+  const [loading, setLoading] = useState(mode === "edit" && !!definitionId);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState(null);
@@ -655,21 +657,14 @@ export default function DefinitionEditor({
   // linger past the moment it was useful.
   const [suggestSuccess, setSuggestSuccess] = useState(null);
 
-  // Hydrate the draft when the modal opens. Reset on close so reopening
-  // doesn't show stale state from a previous edit.
+  // Hydrate the draft when the modal mounts in edit mode. The parent
+  // unmounts/remounts the editor on every open (editorMode flips through
+  // null), so we don't need an open-prop guard or in-body state resets —
+  // useState defaults above already produce the clean baseline. The dead
+  // `if (!open)` reset branch went with the cleanup.
   useEffect(() => {
-    if (!open) {
-      setDraft({ documentType: "", description: "", fields: [] });
-      setOriginal(null);
-      setError(null);
-      setLoadError(null);
-      setTemplates([]);
-      return undefined;
-    }
     if (mode !== "edit" || !definitionId) return undefined;
     const ctrl = new AbortController();
-    setLoading(true);
-    setLoadError(null);
     fetchDefinition(definitionId, { signal: ctrl.signal })
       .then((data) => {
         if (ctrl.signal.aborted) return;
@@ -689,7 +684,7 @@ export default function DefinitionEditor({
         if (!ctrl.signal.aborted) setLoading(false);
       });
     return () => ctrl.abort();
-  }, [open, mode, definitionId]);
+  }, [mode, definitionId]);
 
   // Templates list: load once when the create-mode modal opens. Edit-mode
   // never shows the picker, so skip the fetch in that branch.
@@ -766,35 +761,30 @@ export default function DefinitionEditor({
 
   // Auto-start on open: when the parent passes `autoStartSuggest=true`
   // (entry via the FieldsPanel CTA), kick off generation as soon as the
-  // modal mounts. Latched on the parent prop so a re-render after the
-  // generation completes doesn't refire it. The latch is local to this
-  // effect run; reopening the modal with the prop true again refires
-  // exactly once, which is what we want.
-  const [autoStartConsumed, setAutoStartConsumed] = useState(false);
+  // modal mounts. The parent's mount/unmount cycle already gives us a
+  // fresh ref per opening, so a plain ref (not state) latches the
+  // one-shot semantics without nudging us into another render.
+  //
+  // The dispatch is deferred to a microtask so runAutoGenerate's
+  // synchronous setSuggestLoading/setError/setSuggestSuccess don't run
+  // inside the effect body (the set-state-in-effect rule traces through
+  // function calls). The microtask still runs before paint, so the
+  // "Generating…" indicator surfaces in the very next render with no
+  // user-visible delay.
+  const autoStartTriggeredRef = useRef(false);
   useEffect(() => {
-    if (!open) {
-      setAutoStartConsumed(false);
+    if (autoStartTriggeredRef.current) return;
+    if (
+      mode !== "create" ||
+      !autoStartSuggest ||
+      !suggestForDocId ||
+      suggestLoading
+    ) {
       return;
     }
-    if (
-      mode === "create" &&
-      autoStartSuggest &&
-      suggestForDocId &&
-      !autoStartConsumed &&
-      !suggestLoading
-    ) {
-      setAutoStartConsumed(true);
-      runAutoGenerate();
-    }
-  }, [
-    open,
-    mode,
-    autoStartSuggest,
-    suggestForDocId,
-    autoStartConsumed,
-    suggestLoading,
-    runAutoGenerate,
-  ]);
+    autoStartTriggeredRef.current = true;
+    queueMicrotask(() => runAutoGenerate());
+  }, [mode, autoStartSuggest, suggestForDocId, suggestLoading, runAutoGenerate]);
 
   const handleApplyTemplate = useCallback(async (templateId) => {
     if (!templateId) return;

@@ -14,28 +14,39 @@ export default function DocumentViewer({
   loading,
 }) {
   const [currentPage, setCurrentPage] = useState(1);
+  // Image dimensions are tagged with the page they were measured for, so a
+  // late onLoad from a previously-visible page can't paint the new page's
+  // overlays with stale geometry.
   const [imageDimensions, setImageDimensions] = useState(null);
 
   const numPages = documentData?.num_pages || 1;
 
-  useEffect(() => {
+  // Reset paging state when the doc itself changes — handled during render
+  // via the "store the previous prop" pattern so React doesn't pay an extra
+  // commit/effect cycle to do what is really derived-from-input work.
+  const [prevDocId, setPrevDocId] = useState(docId);
+  if (prevDocId !== docId) {
+    setPrevDocId(docId);
     setCurrentPage(1);
     setImageDimensions(null);
-  }, [docId]);
+  }
 
-  // Clear dimensions when the page changes too: the next image hasn't loaded
-  // yet, and using prior-page dims for the highlight overlay misplaces it.
-  useEffect(() => {
-    setImageDimensions(null);
-  }, [currentPage]);
-
-  // Navigate to the highlighted field's page
-  useEffect(() => {
-    if (!highlightedField || !highlightedField.page) return;
-    if (highlightedField.page !== currentPage) {
+  // Jump to the page that owns the highlighted field. Tracked against the
+  // previous prop so user-driven prev/next nav (which changes currentPage,
+  // not highlightedField) isn't immediately overridden back.
+  const [prevHighlightedField, setPrevHighlightedField] = useState(highlightedField);
+  if (prevHighlightedField !== highlightedField) {
+    setPrevHighlightedField(highlightedField);
+    if (highlightedField?.page && highlightedField.page !== currentPage) {
       setCurrentPage(highlightedField.page);
     }
-  }, [highlightedField, currentPage]);
+  }
+
+  // Dimensions for any page other than the current one are stale: don't
+  // hand them to projectBbox or the overlays would mis-place themselves
+  // for a frame.
+  const currentImageDimensions =
+    imageDimensions?.pageNo === currentPage ? imageDimensions : null;
 
   // Pre-fetch adjacent pages so navigation is instant. The browser caches the
   // PNG, and the server memoizes the rendered bytes, so this also warms both.
@@ -61,14 +72,18 @@ export default function DocumentViewer({
     };
   }, [docId, currentPage, numPages]);
 
-  const handleImageLoad = useCallback((e) => {
-    setImageDimensions({
-      width: e.target.naturalWidth,
-      height: e.target.naturalHeight,
-      displayWidth: e.target.clientWidth,
-      displayHeight: e.target.clientHeight,
-    });
-  }, []);
+  const handleImageLoad = useCallback(
+    (e) => {
+      setImageDimensions({
+        pageNo: currentPage,
+        width: e.target.naturalWidth,
+        height: e.target.naturalHeight,
+        displayWidth: e.target.clientWidth,
+        displayHeight: e.target.clientHeight,
+      });
+    },
+    [currentPage],
+  );
 
   const handleImageError = useCallback(() => setImageDimensions(null), []);
 
@@ -117,10 +132,10 @@ export default function DocumentViewer({
   // we can place them accurately.
   const projectBbox = useCallback(
     (bbox) => {
-      if (!bbox || !imageDimensions) return null;
-      const { displayWidth, displayHeight } = imageDimensions;
+      if (!bbox || !currentImageDimensions) return null;
+      const { displayWidth, displayHeight } = currentImageDimensions;
       const pageDims =
-        documentData?.page_dimensions?.[currentPage] || imageDimensions;
+        documentData?.page_dimensions?.[currentPage] || currentImageDimensions;
       const pageWidth = pageDims.width;
       const pageHeight = pageDims.height;
       const scaleX = displayWidth / pageWidth;
@@ -139,7 +154,7 @@ export default function DocumentViewer({
       }
       return { left, top, width, height };
     },
-    [imageDimensions, documentData, currentPage],
+    [currentImageDimensions, documentData, currentPage],
   );
 
   // All matched fields whose bbox lands on the current page. Each one renders
