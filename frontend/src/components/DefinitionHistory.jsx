@@ -73,21 +73,25 @@ export default function DefinitionHistory({
   onRestored, // (definitionId) => void — caller refetches + closes
 }) {
   const [versions, setVersions] = useState([]);
-  const [loading, setLoading] = useState(false);
+  // Start in the loading state — the parent only mounts this modal when
+  // there's a definitionId to fetch for, so we'll always kick off a
+  // request on first render and the spinner should be visible until it
+  // resolves. Avoids a synchronous setLoading(true) inside the effect.
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
   const [archived, setArchived] = useState(null);
   const [current, setCurrent] = useState(null);
   const [restoring, setRestoring] = useState(false);
 
-  // Reset state every time the modal opens against a new definition.
+  // Fetch on mount. The parent unmounts this modal when `historyOpen` flips
+  // back to false (and a `key={definitionId}` forces a clean remount when
+  // the user switches definitions while it's open), so we don't need an
+  // open-prop guard or in-body state resets — every mount starts from the
+  // useState defaults above.
   useEffect(() => {
-    if (!open || !definitionId) return undefined;
+    if (!definitionId) return undefined;
     const ctrl = new AbortController();
-    setLoading(true);
-    setError(null);
-    setSelectedId(null);
-    setArchived(null);
     Promise.all([
       fetchDefinitionVersions(definitionId, { signal: ctrl.signal }),
       fetchDefinition(definitionId, { signal: ctrl.signal }),
@@ -105,7 +109,7 @@ export default function DefinitionHistory({
         if (!ctrl.signal.aborted) setLoading(false);
       });
     return () => ctrl.abort();
-  }, [open, definitionId]);
+  }, [definitionId]);
 
   const handleSelect = useCallback(
     async (id) => {

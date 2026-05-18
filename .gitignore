@@ -14,6 +14,13 @@ htmlcov/
 node_modules/
 frontend/build/
 
+# Playwright E2E artifacts and per-run state. The .tmp dir holds the
+# isolated TEST_DOCS_DIR/DEFINITIONS_DIR the e2e backend runs against;
+# both report dirs are regenerated on every run.
+frontend/playwright/.tmp/
+frontend/playwright-report/
+frontend/test-results/
+
 # IDE
 .idea/
 .vscode/
