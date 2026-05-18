@@ -625,6 +625,10 @@ export default function App() {
       )}
       {historyOpen && editorMode === "edit" && selectedDefId && (
         <DefinitionHistory
+          // Force a fresh mount if the user switches definitions while the
+          // history modal is open — useState defaults then re-run with the
+          // right initial loading state for the new id.
+          key={selectedDefId}
           open
           definitionId={selectedDefId}
           onClose={() => setHistoryOpen(false)}
