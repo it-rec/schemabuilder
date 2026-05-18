@@ -1308,6 +1308,169 @@ def _warm_up_converter():
         _warmup_done.set()
 
 
+def _bbox_to_dict(bbox: object) -> Optional[dict]:
+    """Convert a Docling BoundingBox to the plain dict the frontend expects.
+
+    Returns None when the object isn't a usable bbox (no ``.l``, etc.). The
+    coord_origin handling mirrors what we do for prov bboxes — docling-core's
+    CoordOrigin enum is stringified differently across Python versions, so we
+    pull ``.value`` / ``.name`` to keep the frontend's ``=== "BOTTOMLEFT"``
+    check reliable.
+    """
+    if bbox is None or not hasattr(bbox, "l"):
+        return None
+    out: dict = {
+        "l": float(bbox.l),
+        "t": float(bbox.t),
+        "r": float(bbox.r),
+        "b": float(bbox.b),
+    }
+    if hasattr(bbox, "coord_origin"):
+        co = bbox.coord_origin
+        if hasattr(co, "value"):
+            out["coord_origin"] = str(co.value)
+        elif hasattr(co, "name"):
+            out["coord_origin"] = co.name
+        else:
+            out["coord_origin"] = str(co)
+    return out
+
+
+def _union_bboxes(bboxes: list) -> Optional[dict]:
+    """Smallest bbox enclosing all inputs. Returns None for an empty list.
+
+    Handles both coordinate origins: with BOTTOMLEFT, ``t`` is the larger y and
+    ``b`` the smaller; with TOPLEFT it's the reverse. The union keeps the
+    origin of the first box so it stays in the same space the frontend will
+    project.
+    """
+    boxes = [b for b in bboxes if b]
+    if not boxes:
+        return None
+    origin = boxes[0].get("coord_origin")
+    if origin == "BOTTOMLEFT":
+        bottom_left = True
+    elif origin == "TOPLEFT":
+        bottom_left = False
+    else:
+        first = boxes[0]
+        bottom_left = first.get("t", 0) > first.get("b", 0)
+    left = min(b["l"] for b in boxes)
+    right = max(b["r"] for b in boxes)
+    if bottom_left:
+        top = max(b["t"] for b in boxes)
+        bottom = min(b["b"] for b in boxes)
+    else:
+        top = min(b["t"] for b in boxes)
+        bottom = max(b["b"] for b in boxes)
+    out: dict = {"l": left, "t": top, "r": right, "b": bottom}
+    if origin is not None:
+        out["coord_origin"] = origin
+    return out
+
+
+def _table_item_rows(item: object) -> list[dict]:
+    """Split a Docling TableItem into one entry-shaped dict per table row.
+
+    Returns ``[{"text", "page", "bbox", "cells", "headers"}, ...]`` (entry ids
+    assigned by the caller). Empty list when the item carries no usable cell
+    data — the caller then falls back to the whole-table markdown entry.
+
+    Without this, Docling hands us the table as a single ``export_to_markdown``
+    blob with one bbox spanning the whole table: array fields then see exactly
+    one giant "row" and the viewer outlines the entire table when you hover a
+    single line item. One entry per row gives each line item its own geometry.
+
+    Per-cell data is preserved alongside the joined text so an array
+    sub-field can route to a specific column ("Anzahl" → quantity) instead
+    of regex-scanning the whole row — that's the difference between picking
+    up the line total ("17.43") and picking up the date prefix ("25.03").
+
+    Rows whose every cell is a column header are dropped from the data rows
+    list — that's the repeating header, not a data row — but their text is
+    captured per-column into ``headers`` so consumers can map sub-fields to
+    columns by header text.
+    """
+    data = getattr(item, "data", None)
+    cells = getattr(data, "table_cells", None) if data is not None else None
+    if not cells:
+        return []
+
+    page_no = 1
+    prov = getattr(item, "prov", None)
+    if prov:
+        page_no = getattr(prov[0], "page_no", 1) or 1
+
+    # Group cells by their starting row index. A cell that spans rows lands in
+    # its first row — good enough for per-row text and geometry.
+    rows: dict = {}
+    for cell in cells:
+        row_idx = getattr(cell, "start_row_offset_idx", None)
+        if row_idx is None:
+            continue
+        rows.setdefault(row_idx, []).append(cell)
+
+    # First pass: scan all rows for the column-header row (every cell flagged
+    # column_header=True). Index header text by column so downstream can do
+    # `headers[col_idx]` to get "Anzahl" / "Betrag" / etc.
+    headers: dict[int, str] = {}
+    for row_cells in rows.values():
+        if not row_cells:
+            continue
+        if all(getattr(c, "column_header", False) for c in row_cells):
+            for c in row_cells:
+                col = getattr(c, "start_col_offset_idx", None)
+                if col is None:
+                    continue
+                ctext = (getattr(c, "text", "") or "").strip()
+                if ctext:
+                    headers[col] = ctext
+
+    out: list[dict] = []
+    for row_idx in sorted(rows):
+        row_cells = sorted(
+            rows[row_idx],
+            key=lambda c: getattr(c, "start_col_offset_idx", 0) or 0,
+        )
+        if row_cells and all(
+            getattr(c, "column_header", False) for c in row_cells
+        ):
+            continue
+        texts: list[str] = []
+        cell_boxes: list[dict] = []
+        cells_out: list[dict] = []
+        for c in row_cells:
+            ctext = (getattr(c, "text", "") or "").strip()
+            cbox = _bbox_to_dict(getattr(c, "bbox", None))
+            col = getattr(c, "start_col_offset_idx", None)
+            if ctext:
+                texts.append(ctext)
+            if cbox is not None:
+                cell_boxes.append(cbox)
+            if col is not None:
+                cells_out.append(
+                    {
+                        "col": col,
+                        "text": ctext,
+                        "bbox": cbox,
+                        "header": headers.get(col, ""),
+                    }
+                )
+        row_text = " ".join(texts).strip()
+        if not row_text:
+            continue
+        out.append(
+            {
+                "text": row_text,
+                "page": page_no,
+                "bbox": _union_bboxes(cell_boxes),
+                "cells": cells_out,
+                "headers": dict(headers),
+            }
+        )
+    return out
+
+
 def _extract_text(filepath: Path) -> tuple[list, dict]:
     """Extract text entries using Docling. Returns (text_entries, page_dimensions).
 
@@ -1371,6 +1534,31 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
     for element in doc.iterate_items():
         item = element[0] if isinstance(element, tuple) else element
 
+        # Tables: emit one entry per row instead of one whole-table blob, so
+        # array fields see individual line items (each with its own bbox).
+        # Falls back to the markdown path below when the item carries no
+        # usable cell data.
+        if type(item).__name__ == "TableItem":
+            rows = _table_item_rows(item)
+            if rows:
+                for row in rows:
+                    text_entries.append(
+                        {
+                            "id": entry_id,
+                            "text": row["text"],
+                            "type": "TableItem",
+                            "page": row["page"],
+                            "bbox": row["bbox"],
+                            # Preserve per-cell text + bbox + column header so
+                            # array sub-fields can route to a specific column
+                            # instead of regex-scanning the joined row text.
+                            "cells": row.get("cells", []),
+                            "headers": row.get("headers", {}),
+                        }
+                    )
+                    entry_id += 1
+                continue
+
         text = ""
         if hasattr(item, "text"):
             text = item.text
@@ -1395,27 +1583,10 @@ def _extract_text(filepath: Path) -> tuple[list, dict]:
             entry["page"] = page_no
 
             if hasattr(prov, "bbox") and prov.bbox is not None:
-                bbox = prov.bbox
-                if hasattr(bbox, "l"):
-                    entry["bbox"] = {
-                        "l": float(bbox.l),
-                        "t": float(bbox.t),
-                        "r": float(bbox.r),
-                        "b": float(bbox.b),
-                    }
-                    if hasattr(bbox, "coord_origin"):
-                        # docling-core's CoordOrigin is an Enum; str(member) is
-                        # version-dependent ("BOTTOMLEFT" on Python 3.11+ str-
-                        # based enums, "CoordOrigin.BOTTOMLEFT" on 3.10). Pull
-                        # the underlying value/name so the frontend's
-                        # === "BOTTOMLEFT" check is reliable.
-                        co = bbox.coord_origin
-                        if hasattr(co, "value"):
-                            entry["bbox"]["coord_origin"] = str(co.value)
-                        elif hasattr(co, "name"):
-                            entry["bbox"]["coord_origin"] = co.name
-                        else:
-                            entry["bbox"]["coord_origin"] = str(co)
+                # _bbox_to_dict normalizes docling-core's CoordOrigin enum
+                # (stringified differently across Python versions) so the
+                # frontend's === "BOTTOMLEFT" check stays reliable.
+                entry["bbox"] = _bbox_to_dict(prov.bbox)
 
         text_entries.append(entry)
 
@@ -1775,15 +1946,39 @@ def _invalidate_definitions_cache() -> None:
 
 
 # Static, module-level patterns: cheaper than recompiling on every entry.
-_DATE_EXAMPLE_RE = re.compile(r'\d{4}-\d{2}-\d{2}')
+# Date shapes the matcher recognises. Originally ISO-only — extended so a
+# DE invoice ("25.03.2026") doesn't fall through to "decimal_format". Order
+# matters only inside the alternation: each shape is anchored at both ends
+# by `_DATE_DETECT_HEAD_RE` to avoid catching e.g. "25.03" inside a longer
+# string.
+_DATE_PATTERNS_RAW = (
+    r"\d{4}-\d{1,2}-\d{1,2}"       # ISO:        2026-03-25
+    r"|\d{1,2}\.\d{1,2}\.\d{2,4}"   # DE / EU:    25.03.2026, 25.3.26
+    r"|\d{1,2}/\d{1,2}/\d{2,4}"     # US / UK:    03/25/2026, 3/25/26
+    r"|\d{4}/\d{1,2}/\d{1,2}"       # ISO-slash:  2026/03/25
+)
+_DATE_EXAMPLE_RE = re.compile(r"^(?:" + _DATE_PATTERNS_RAW + r")")
 _ID_EXAMPLE_RE = re.compile(r'^[A-Z]+-\d+')
 _DECIMAL_EXAMPLE_FULL_RE = re.compile(r'^\d+\.\d+$')
 _INT_EXAMPLE_RE = re.compile(r'^\d+$')
-_DATE_DETECT_HEAD_RE = re.compile(r'\d{4}-\d{2}-\d{2}')
+# Lookarounds reject embedded matches ("25.03" inside "25.03.2026.x"
+# already gets through the first alternation; the boundaries ensure the
+# *whole* date sits between non-date characters).
+_DATE_DETECT_HEAD_RE = re.compile(
+    r"(?<![\d.\-/])(?:" + _DATE_PATTERNS_RAW + r")(?![\d.\-/])"
+)
 _DATE_DETECT_LOOSE_RE = re.compile(r'\d{4}[-/]\d{2}[-/]\d{2}')
 _ID_HEAD_RE = re.compile(r'[A-Z]+-\d+')
 _ID_DETECT_RE = re.compile(r'[A-Z]+-\d+', re.IGNORECASE)
-_DECIMAL_DETECT_RE = re.compile(r'\d+\.\d{2}')
+# Strict "money-shaped decimal": \d+.\d{2} that is NOT embedded inside a
+# longer number-with-dots run. Without the lookarounds, `\d+\.\d{2}` matches
+# "25.03" inside a DD.MM.YYYY date like "25.03.2026" and an array-field
+# amount picks up the date instead of the line total.
+#   (?<![\d.])  — no digit or dot directly before the match (so "12.34" inside
+#                 "25.03.2026" or "1234.56" inside "12345.67" is rejected)
+#   (?![\d.])   — no digit or dot directly after (so "25.03" inside
+#                 "25.03.2026" is rejected; "25" is followed by ".2026")
+_DECIMAL_DETECT_RE = re.compile(r'(?<![\d.])\d+\.\d{2}(?![\d.])')
 _DECIMAL_LOOSE_DETECT_RE = re.compile(r'\d+\.\d+')
 _INT_WORD_RE = re.compile(r'\b\d+\b')
 _CURRENCY_SIGN_RE = re.compile(r'[\$€£¥]')
@@ -2046,6 +2241,65 @@ def _narrow_currency_value(text: str) -> str:
     return text
 
 
+# Match reasons whose `extracted_value` is a self-contained token that can
+# legitimately repeat verbatim across the document (currency code, vendor
+# name, an option from a list, a regex hit). For these we collect every
+# *other* entry that contains the same token so the frontend can render a
+# ghost overlay on each occurrence. Reasons left out on purpose — decimal /
+# date / id_format treat the whole entry as the value; `label` matched only
+# on the field name; below-threshold rejects don't get an extracted value.
+_MULTI_BBOX_REASONS = frozenset(
+    {
+        "option_exact",
+        "option_substring",
+        "example_exact",
+        "example_substring",
+        "pattern_match",
+        "currency_sign",
+    }
+)
+
+
+def _narrow_bbox_to_substring(
+    bbox: Optional[dict], full_text: str, value: str
+) -> Optional[dict]:
+    """Shrink a bbox horizontally to the span ``value`` occupies in ``full_text``.
+
+    The matcher frequently returns a substring of a wider entry — a currency
+    token, a regex hit, a matched option. Without this the viewer outlines the
+    whole entry (often a full sentence). Docling gives us no per-character
+    geometry, so this linearly interpolates the horizontal extent, assuming a
+    single line of roughly even character width.
+
+    Falls back to the original bbox when narrowing would be unsafe or
+    pointless: no bbox, blank/absent value, value spans essentially the whole
+    entry, or the entry has internal newlines (a multi-line block, where
+    horizontal interpolation would misplace the box).
+    """
+    if not bbox or not full_text or not value:
+        return bbox
+    if "\n" in full_text:
+        return bbox
+    idx = full_text.find(value)
+    if idx < 0:
+        return bbox
+    total = len(full_text)
+    span = len(value)
+    if span >= total:
+        return bbox
+    left = bbox.get("l")
+    right = bbox.get("r")
+    if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
+        return bbox
+    width = right - left
+    if width <= 0:
+        return bbox
+    narrowed = dict(bbox)
+    narrowed["l"] = left + width * (idx / total)
+    narrowed["r"] = left + width * ((idx + span) / total)
+    return narrowed
+
+
 def _compile_field_matchers(field: dict) -> dict:
     """Pre-compile per-field state so the entry loop avoids recompiling regexes."""
     examples = field.get("examples", []) or []
@@ -2123,6 +2377,36 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
                     seen_pages.add(p)
                     pages.append(p)
         pages.sort()
+        # Table-level geometry so hovering the array field outlines the whole
+        # table (distinct from hovering one item, which lights up just that
+        # row). Union the per-item row bboxes — NOT sub-field bboxes —
+        # because sub-fields can be column-routed to tight cell bboxes
+        # ("Betrag" column only), and a union of those would outline just
+        # one column instead of the whole table. matched_entry_id is a
+        # synthetic string: real entry ids are ints, so it can never
+        # collide with a row's id.
+        array_page: Optional[int] = None
+        row_boxes: list[dict] = []
+        for item in items:
+            box = item.get("bbox")
+            page = item.get("page")
+            if box is None or page is None:
+                # Legacy/regex-only path: items without their own row
+                # geometry — fall back to the first sub-field's bbox.
+                for sf in item.get("fields") or []:
+                    sbox = sf.get("bbox")
+                    if sbox is not None:
+                        box = sbox
+                        page = sf.get("page")
+                        break
+            if box is None or page is None:
+                continue
+            if array_page is None:
+                array_page = page
+            if page == array_page:
+                row_boxes.append(box)
+        array_bbox = _union_bboxes(row_boxes)
+        array_entry_id = f"array:{field['name']}" if array_bbox is not None else None
         result = {
             "name": field["name"],
             "description": field.get("description", ""),
@@ -2138,9 +2422,9 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             else None,
             "extracted_value": None,
             "confidence": 0,
-            "matched_entry_id": None,
-            "page": None,
-            "bbox": None,
+            "matched_entry_id": array_entry_id,
+            "page": array_page if array_bbox is not None else None,
+            "bbox": array_bbox,
             "match_reason": None,
             "match_score": 0,
             "type": "array",
@@ -2169,6 +2453,18 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
     # so we can return just the regex hit (e.g. the IBAN) rather than the
     # entire enclosing text entry. Cleared whenever a non-pattern signal wins.
     best_pattern_substring: Optional[str] = None
+    # Likewise for `option_substring`: the matched option (e.g. "EUR" found
+    # inside a sentence) is the value, not the sentence. Cleared whenever a
+    # non-option-substring signal wins.
+    best_option_substring: Optional[str] = None
+    # Same idea for `example_substring`: when an example matches as a substring
+    # of a longer text (e.g. example "€" found inside "Total: 38.87 €"), the
+    # example itself is the value. Cleared whenever a non-example-substring
+    # signal wins.
+    best_example_substring: Optional[str] = None
+    # And for `date_format`: the matched date substring ("25.03.2026" inside
+    # "Rechnungsdatum: 25.03.2026") is the value, not the whole entry.
+    best_date_substring: Optional[str] = None
 
     for entry in text_entries:
         if entry["id"] in used_ids:
@@ -2187,19 +2483,24 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         # Available options: exact (90) is the max for this loop, so break on
         # exact only; for substring (75), upgrade and keep scanning so a later
         # exact match isn't missed (e.g. options=["AB", "ABC"], text="ABC").
+        option_substring: Optional[str] = None
         for opt_lower_strip, opt_pattern in options:
             if opt_lower_strip == text_stripped_lower:
                 if score < 90:
                     score = 90
                     reason = "option_exact"
                 break
-            if score < 75 and opt_pattern.search(text):
-                score = 75
-                reason = "option_substring"
+            if score < 75:
+                om = opt_pattern.search(text)
+                if om:
+                    score = 75
+                    reason = "option_substring"
+                    option_substring = om.group(0)
 
         # Examples: exact (95) is the max; substring (80) upgrades only.
         # Same rationale: examples=["INV", "INV-001"] with text="INV-001"
         # must score 95, not 80.
+        example_substring: Optional[str] = None
         for ex_strip, ex_lower in zip(example_lower_strip, example_lower, strict=False):
             if ex_strip == text_stripped_lower:
                 if score < 95:
@@ -2209,17 +2510,38 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
             if score < 80 and ex_lower and ex_lower in text_lower:
                 score = 80
                 reason = "example_substring"
+                # Capture the original-cased slice from `text` so downstream
+                # narrowing trims the bbox to the example's span (not the
+                # whole sentence the matcher happened to find it in).
+                idx_es = text_lower.find(ex_lower)
+                if idx_es >= 0:
+                    example_substring = text[idx_es : idx_es + len(ex_lower)]
 
         # Format heuristics
-        if has_date and _DATE_DETECT_HEAD_RE.search(text):
-            if score < 85:
+        date_substring: Optional[str] = None
+        if has_date:
+            date_m = _DATE_DETECT_HEAD_RE.search(text)
+            if date_m and score < 85:
                 score = 85
                 reason = "date_format"
+                # Capture the actual date span so downstream can narrow
+                # extracted_value + bbox to "25.03.2026" instead of returning
+                # the whole entry text "Rechnungsdatum: 25.03.2026".
+                date_substring = date_m.group(0)
         if has_id and _ID_DETECT_RE.search(text):
             if score < 85:
                 score = 85
                 reason = "id_format"
-        if has_decimal and _DECIMAL_DETECT_RE.search(text):
+        if has_decimal and (
+            _DECIMAL_DETECT_RE.search(text)
+            # Fallback for currency-shaped values the strict decimal regex
+            # rejects: grouped thousands ("1.234,56"), trailing currency sign
+            # ("1.234,56 €"). _CURRENCY_VALUE_RE handles both. The strict
+            # regex stays the primary signal so plain "10.72" still wins
+            # cleanly; this fallback only kicks in when the strict one
+            # didn't find anything (e.g. European notation).
+            or _CURRENCY_VALUE_RE.search(text)
+        ):
             if score < 70:
                 score = 70
                 reason = "decimal_format"
@@ -2245,12 +2567,35 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
                 reason = "pattern_match"
                 pattern_substring = pm.group(1) if pm.groups() else pm.group(0)
 
-        if score > best_score:
+        # On a score tie between two substring matches of the same kind,
+        # prefer the shorter entry: a matched option/example buried in a long
+        # paragraph is a looser hit than the same match in a tight line, and
+        # the tight line also narrows cleanly for the highlight overlay.
+        # date_format is included so the dedicated "Rechnungsdatum: …" line
+        # wins over a TableItem row that happens to start with the same date.
+        tie_breaks = (
+            score == best_score
+            and score > 0
+            and best_match is not None
+            and reason == best_reason
+            and reason in ("option_substring", "example_substring", "date_format")
+            and len(text) < len(best_match.get("text", ""))
+        )
+        if score > best_score or tie_breaks:
             best_score = score
             best_match = entry
             best_reason = reason
             best_pattern_substring = (
                 pattern_substring if reason == "pattern_match" else None
+            )
+            best_option_substring = (
+                option_substring if reason == "option_substring" else None
+            )
+            best_example_substring = (
+                example_substring if reason == "example_substring" else None
+            )
+            best_date_substring = (
+                date_substring if reason == "date_format" else None
             )
 
     # Per-field acceptance threshold (0–1). Defaults to 0.5 to preserve the
@@ -2287,6 +2632,15 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         "matched_entry_id": None,
         "page": None,
         "bbox": None,
+        # Additional places in the document where the *same* extracted value
+        # appears verbatim. Used for tokens like a currency code or a vendor
+        # name that legitimately repeat across the page; the primary `bbox` /
+        # `page` still drives navigation (and is the canonical hit), but the
+        # frontend can render a ghost overlay on every entry in this list so
+        # hovering the field lights up all of them at once. Empty when the
+        # match signal doesn't lend itself to repetition (e.g. decimal_format,
+        # date_format — the *value* there is the entry, not a token inside it).
+        "additional_bboxes": [],
         # Why this field matched (or didn't) — useful for tuning heuristics
         # and for the frontend to show users *which* signal fired. `null`
         # when nothing scored above threshold.
@@ -2301,23 +2655,96 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
 
     if best_match and best_score >= score_cutoff:
         used_ids.add(best_match["id"])
+        # Several signals carve a substring out of a wider entry rather than
+        # taking the whole text. When they do, `narrowed_substring` records
+        # what was carved so the highlight bbox can be trimmed to match —
+        # otherwise the viewer outlines the whole enclosing sentence.
+        narrowed_substring: Optional[str] = None
         # Pattern matches return just the captured substring (the IBAN, the
-        # VAT id, etc.) rather than the surrounding sentence. Other signals
-        # return the full entry text — that's been the contract since day one.
+        # VAT id, etc.) rather than the surrounding sentence.
         if best_reason == "pattern_match" and best_pattern_substring is not None:
             result["extracted_value"] = best_pattern_substring
+            narrowed_substring = best_pattern_substring
+        # An option matched as a substring: the option (e.g. "EUR") is the
+        # value, not the sentence it was found in.
+        elif best_reason == "option_substring" and best_option_substring is not None:
+            result["extracted_value"] = best_option_substring
+            narrowed_substring = best_option_substring
+        # Same for an example matched as a substring (e.g. example "€" inside
+        # "Total: 38.87 €"): the example itself is the value, and the bbox
+        # should narrow to its character span so the highlight covers only
+        # the example — not the whole sentence.
+        elif best_reason == "example_substring" and best_example_substring is not None:
+            result["extracted_value"] = best_example_substring
+            narrowed_substring = best_example_substring
+        # date_format hit a specific date substring ("25.03.2026") inside a
+        # potentially longer entry ("Rechnungsdatum: 25.03.2026"); narrow.
+        elif best_reason == "date_format" and best_date_substring is not None:
+            result["extracted_value"] = best_date_substring
+            narrowed_substring = best_date_substring
         elif _is_currency_field(field, best_reason):
             # Currency fields return just the money substring, not the
             # whole sentence the matcher found it in.
-            result["extracted_value"] = _narrow_currency_value(best_match["text"])
+            narrowed = _narrow_currency_value(best_match["text"])
+            result["extracted_value"] = narrowed
+            narrowed_substring = narrowed
         else:
             result["extracted_value"] = best_match["text"]
         result["confidence"] = best_score / 100.0
         result["matched_entry_id"] = best_match["id"]
         result["page"] = best_match.get("page")
-        result["bbox"] = best_match.get("bbox")
+        bbox = best_match.get("bbox")
+        if narrowed_substring is not None:
+            bbox = _narrow_bbox_to_substring(
+                bbox, best_match["text"], narrowed_substring
+            )
+        result["bbox"] = bbox
         result["match_reason"] = best_reason
         result["match_score"] = best_score
+        # Collect every other entry that contains the same extracted value
+        # verbatim, so the UI can outline all of them when the user hovers
+        # the field. Gated on match_reason so we don't generate phantom
+        # overlays for date_format / decimal_format / label matches, where
+        # the "value" is the whole entry text and a substring search would
+        # turn into noise (e.g. "Total" as a label finds every "total").
+        needle = result["extracted_value"]
+        if (
+            best_reason in _MULTI_BBOX_REASONS
+            and isinstance(needle, str)
+            and needle
+        ):
+            needle_lower = needle.lower()
+            additional: list[dict] = []
+            primary_id = best_match["id"]
+            for other in text_entries:
+                if other["id"] == primary_id:
+                    continue
+                other_bbox = other.get("bbox")
+                other_page = other.get("page")
+                other_text = other.get("text", "")
+                if (
+                    other_bbox is None
+                    or other_page is None
+                    or not other_text
+                ):
+                    continue
+                # Skip multi-line entries: horizontal interpolation would
+                # mis-place the box across the line break.
+                if "\n" in other_text:
+                    continue
+                idx_other = other_text.lower().find(needle_lower)
+                if idx_other < 0:
+                    continue
+                sub = other_text[idx_other : idx_other + len(needle)]
+                narrowed_other = _narrow_bbox_to_substring(
+                    other_bbox, other_text, sub
+                )
+                if narrowed_other is None:
+                    continue
+                additional.append(
+                    {"page": other_page, "bbox": narrowed_other}
+                )
+            result["additional_bboxes"] = additional
         applied, normalized = _apply_normalizer(
             field.get("normalizer"), result["extracted_value"]
         )
@@ -2334,6 +2761,92 @@ def _match_field_to_entries(field: dict, text_entries: list, used_ids: set) -> d
         }
 
     return result
+
+
+# Synonyms keyed on sub-field name (lowercased). Used to route a sub-field
+# to the right column of a table when the row carries header metadata. Each
+# value is a list of substrings; a column header matches if it contains any
+# of them (case-insensitive). Bilingual (DE/EN) for the common cases that
+# show up in the test corpus; extend as new languages arrive — explicit
+# `column_header_pattern` on a sub-field always wins over these defaults.
+_DEFAULT_COLUMN_HEADERS = {
+    "amount": ["betrag", "amount", "total", "summe", "gesamt", "preis", "price"],
+    "total": ["betrag", "amount", "total", "summe", "gesamt"],
+    "quantity": ["anzahl", "menge", "qty", "quantity", "stk", "stuck", "stück", "count"],
+    "qty": ["anzahl", "menge", "qty", "quantity", "stk", "stuck", "stück", "count"],
+    "count": ["anzahl", "menge", "qty", "quantity", "stk", "stuck", "stück", "count"],
+    "product_code": [
+        "ziffer", "sku", "code", "art-nr", "art.-nr", "artikelnr", "artikel-nr",
+        "artikelnummer", "produktnr", "produkt-nr", "item-code", "item code",
+    ],
+    "sku": [
+        "ziffer", "sku", "code", "art-nr", "art.-nr", "artikelnr", "artikel-nr",
+        "artikelnummer", "produktnr",
+    ],
+    "description": [
+        "leistung", "bezeichnung", "description", "beschreibung", "service",
+        "produkt", "item", "artikel",
+    ],
+    "date": ["datum", "date"],
+    "unit_price": [
+        "einzelpreis", "einzel-preis", "einzel preis", "unit price",
+        "unit-price", "stuckpreis", "stückpreis",
+    ],
+    "tax": ["mwst", "ust", "steuer", "tax", "vat"],
+    "factor": ["faktor", "factor", "rate", "satz"],
+}
+
+
+def _column_for_subfield(
+    sf: dict, cells: list, headers: dict
+) -> Optional[dict]:
+    """Return the cell that best matches a sub-field's expected column.
+
+    A sub-field can opt in explicitly via ``column_header_pattern`` (a regex
+    tried case-insensitively against each column header). Otherwise we fall
+    back to a built-in synonym table keyed on the sub-field name.
+
+    Returns the matching ``cell`` dict (from _table_item_rows), or None when
+    nothing routes — the caller then falls back to regex over the joined
+    row text.
+    """
+    if not cells:
+        return None
+    raw_pattern = sf.get("column_header_pattern")
+    pattern: Optional[re.Pattern] = None
+    if isinstance(raw_pattern, str) and raw_pattern:
+        try:
+            pattern = re.compile(raw_pattern, re.IGNORECASE)
+        except re.error:
+            pattern = None
+    name = str(sf.get("name", "")).strip().lower()
+    synonyms = _DEFAULT_COLUMN_HEADERS.get(name, [])
+
+    def header_matches(header_text: str) -> bool:
+        if not header_text:
+            return False
+        ht = header_text.strip().lower()
+        if pattern is not None and pattern.search(header_text):
+            return True
+        # Also accept an exact-name match against the sub-field name
+        # (covers definitions that explicitly use the column header as the
+        # sub-field name, e.g. name="Betrag").
+        if ht == name:
+            return True
+        for syn in synonyms:
+            if syn in ht:
+                return True
+        return False
+
+    # Prefer cells whose header matches; if multiple do, the first column
+    # wins (left-most match is usually the intended one in invoice tables).
+    for cell in cells:
+        if header_matches(cell.get("header", "")):
+            # Empty cell text means the column matched but this row has no
+            # value there — treat as "no value" rather than falling back to
+            # regex (which would grab some other column's number).
+            return cell
+    return None
 
 
 def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
@@ -2415,6 +2928,8 @@ def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
                 used_ids.add(entry["id"])
                 continue
 
+        cells = entry.get("cells") or []
+        headers = entry.get("headers") or {}
         item_fields = []
         for sf, kind in sub_specs:
             item_field = {
@@ -2433,27 +2948,58 @@ def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
                 "match_reason": None,
                 "match_score": 0,
             }
-            if kind == "decimal":
-                match = _DECIMAL_DETECT_RE.search(text)
-                if match:
-                    item_field["extracted_value"] = match.group(0)
-                    item_field["confidence"] = 0.6
-                    item_field["match_reason"] = "decimal_format"
-                    item_field["match_score"] = 60
-            elif kind == "id":
-                match = _ID_DETECT_RE.search(text)
-                if match:
-                    item_field["extracted_value"] = match.group(0)
-                    item_field["confidence"] = 0.6
-                    item_field["match_reason"] = "id_format"
-                    item_field["match_score"] = 60
-            elif kind == "int":
-                match = _INT_WORD_RE.search(text)
-                if match:
-                    item_field["extracted_value"] = match.group(0)
-                    item_field["confidence"] = 0.5
-                    item_field["match_reason"] = "int_format"
-                    item_field["match_score"] = 50
+
+            # Column-routed extraction: if the table has headers and the
+            # sub-field maps to a column ("quantity" → "Anzahl"), take that
+            # cell's text + its own bbox. Higher confidence than regex
+            # because we know *which column* this value belongs to.
+            cell_hit = _column_for_subfield(sf, cells, headers) if cells else None
+            if cell_hit is not None:
+                cell_text = (cell_hit.get("text") or "").strip()
+                if cell_text:
+                    item_field["extracted_value"] = cell_text
+                    item_field["confidence"] = 0.85
+                    item_field["match_reason"] = "column_header"
+                    item_field["match_score"] = 85
+                    if cell_hit.get("bbox") is not None:
+                        item_field["bbox"] = cell_hit["bbox"]
+                        # Give the cell a unique synthetic id (string —
+                        # can't collide with integer row entry ids) so the
+                        # frontend can render and target a cell-scoped
+                        # overlay distinct from the row overlay above.
+                        item_field["matched_entry_id"] = (
+                            f"cell:{entry['id']}:{sf['name']}"
+                        )
+
+            # Regex fallback when no column routed (or its cell was empty).
+            if item_field["extracted_value"] is None:
+                if kind == "decimal":
+                    # Strict "money decimal" first (rejects date components
+                    # like "25.03" inside "25.03.2026"). Fall back to the
+                    # broader currency-value regex so European notation
+                    # ("1.234,56 €") still matches.
+                    match = _DECIMAL_DETECT_RE.search(
+                        text
+                    ) or _CURRENCY_VALUE_RE.search(text)
+                    if match:
+                        item_field["extracted_value"] = match.group(0)
+                        item_field["confidence"] = 0.6
+                        item_field["match_reason"] = "decimal_format"
+                        item_field["match_score"] = 60
+                elif kind == "id":
+                    match = _ID_DETECT_RE.search(text)
+                    if match:
+                        item_field["extracted_value"] = match.group(0)
+                        item_field["confidence"] = 0.6
+                        item_field["match_reason"] = "id_format"
+                        item_field["match_score"] = 60
+                elif kind == "int":
+                    match = _INT_WORD_RE.search(text)
+                    if match:
+                        item_field["extracted_value"] = match.group(0)
+                        item_field["confidence"] = 0.5
+                        item_field["match_reason"] = "int_format"
+                        item_field["match_score"] = 50
             if item_field["extracted_value"] is not None:
                 applied, normalized = _apply_normalizer(
                     sf.get("normalizer"), item_field["extracted_value"]
@@ -2464,7 +3010,19 @@ def _match_array_field(field: dict, text_entries: list, used_ids: set) -> list:
 
         if any(f["extracted_value"] for f in item_fields):
             used_ids.add(entry["id"])
-            items.append({"fields": item_fields})
+            items.append(
+                {
+                    # Row-level geometry so the frontend can outline the whole
+                    # line item on hover. Without this it had to pick one
+                    # sub-field's bbox arbitrarily — fine when every sub-field
+                    # inherited the row bbox, broken once column-routing gave
+                    # each sub-field its own (tighter) cell bbox.
+                    "matched_entry_id": entry["id"],
+                    "page": entry.get("page"),
+                    "bbox": entry.get("bbox"),
+                    "fields": item_fields,
+                }
+            )
 
     return items
 
@@ -3157,6 +3715,13 @@ class FieldSpec(BaseModel):
     # | Amount") that repeat at the top of each page.
     multi_page: Optional[bool] = None
     header_pattern: Optional[str] = None
+    # Per-sub-field column router for array tables. When set on a sub-field
+    # (e.g. inside an array's `fields`), the matcher uses it (case-insensitive)
+    # to find the right column header in the table and takes that cell's
+    # value — bypassing the regex-on-joined-text fallback that otherwise
+    # mis-grabs date components or wrong-column digits. Validated as a
+    # compilable regex at upload time.
+    column_header_pattern: Optional[str] = None
     fields: Optional[List["FieldSpec"]] = None
 
     @field_validator("pattern")
@@ -3204,6 +3769,19 @@ class FieldSpec(BaseModel):
         except re.error as e:
             raise ValueError(
                 f"header_pattern is not a valid regular expression: {e}"
+            ) from e
+        return v
+
+    @field_validator("column_header_pattern")
+    @classmethod
+    def _validate_column_header_pattern(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return None
+        try:
+            re.compile(v, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(
+                f"column_header_pattern is not a valid regular expression: {e}"
             ) from e
         return v
 

@@ -7,40 +7,81 @@
         "name": "invoice_date",
         "description": "the invoice creation or issue date.",
         "extraction_instructions": "This number is typically on the top left corner of the document",
-        "examples": ["2024-02-04"]
+        "examples": [
+          "2024-02-04",
+          "Project Status Update",
+          "Document Processing Initiative January 2026"
+        ]
       },
       {
         "name": "invoice_id",
         "description": "unique identifier, reference number, or invoice number.",
-        "examples": ["INV-2024-001", "2024-01-45234"]
+        "examples": [
+          "INV-2024-001",
+          "2024-01-45234"
+        ]
       },
       {
         "name": "customer_name",
         "description": "Full name of the person or company being billed.",
-        "examples": ["John Smith"],
+        "examples": [
+          "John Smith"
+        ],
         "extraction_instructions": "This name may be found as part of the address"
       },
       {
         "name": "customer_billing_address",
         "description": "Complete billing address. This is where bills and invoices are sent.",
-        "examples": ["123 Main St, Anytown, ST 12345"],
+        "examples": [
+          "123 Main St, Anytown, ST 12345"
+        ],
         "extraction_instructions": "This name may be found as part of the address"
       },
       {
         "name": "currency",
         "description": "The currency used in the invoice.",
-        "examples": ["USD"],
+        "examples": [
+          "USD"
+        ],
         "available_options": [
-          "USD", "EUR", "CNY", "JPY", "GBP", "AUD", "CAD", "CHF",
-          "HKD", "SGD", "INR", "KRW", "MXN", "BRL", "ZAR", "SEK",
-          "NOK", "DKK", "NZD", "TRY", "AED", "THB", "PLN", "IDR",
-          "MYR", "PHP", "RUB", "CZK", "ILS"
+          "USD",
+          "EUR",
+          "CNY",
+          "JPY",
+          "GBP",
+          "AUD",
+          "CAD",
+          "CHF",
+          "HKD",
+          "SGD",
+          "INR",
+          "KRW",
+          "MXN",
+          "BRL",
+          "ZAR",
+          "SEK",
+          "NOK",
+          "DKK",
+          "NZD",
+          "TRY",
+          "AED",
+          "THB",
+          "PLN",
+          "IDR",
+          "MYR",
+          "PHP",
+          "RUB",
+          "CZK",
+          "ILS"
         ]
       },
       {
         "name": "currency_sign",
         "description": "The currency sign of the currency used in the invoice.",
-        "examples": ["$", "\u20ac"],
+        "examples": [
+          "$",
+          "\u20ac"
+        ],
         "affix": true
       },
       {
@@ -51,17 +92,23 @@
           {
             "name": "amount",
             "description": "The total amount for the line item.",
-            "examples": ["500.00"]
+            "examples": [
+              "500.00"
+            ]
           },
           {
             "name": "product_code",
             "description": "Any product code, SKU, or identifier for the item.",
-            "examples": ["SKU-123"]
+            "examples": [
+              "SKU-123"
+            ]
           },
           {
             "name": "quantity",
             "description": "Number of units purchased of the item.",
-            "examples": ["2"]
+            "examples": [
+              "2"
+            ]
           }
         ]
       }

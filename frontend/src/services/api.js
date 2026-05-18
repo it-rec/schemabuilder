@@ -201,12 +201,22 @@ export async function fetchDefinition(defId, { signal } = {}) {
   return res.json();
 }
 
-export async function extractFields(docId, definitionId, { signal } = {}) {
+export async function extractFields(
+  docId,
+  definitionId,
+  { signal, refresh = false } = {},
+) {
   // Extraction is a long-running POST. Allow more time than the default GET
   // budget (Docling can take 10-30s on a cold cache for large PDFs) and
   // tolerate a 503 from the concurrency limiter by retrying once after the
   // server's Retry-After.
-  const res = await request(`/api/documents/${docId}/extract`, {
+  // `refresh=true` bypasses the backend's SQLite extraction cache so a
+  // matcher change (deployed code or edited definition) takes effect even
+  // when (doc, definition) would otherwise be a cache hit.
+  const path = refresh
+    ? `/api/documents/${docId}/extract?refresh=true`
+    : `/api/documents/${docId}/extract`;
+  const res = await request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ definition_id: definitionId }),

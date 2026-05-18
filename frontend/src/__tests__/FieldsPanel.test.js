@@ -105,6 +105,94 @@ test("shows loading message when loading", () => {
   expect(screen.getByText("Extracting fields...")).toBeInTheDocument();
 });
 
+test("array item header is hoverable and emits the item's row payload", () => {
+  // line_items with one matched item carrying row-level geometry. The
+  // expanded item header should be focusable, hover the row payload, and
+  // (visually, but checked via class) light up when the item's matched
+  // entry id is the highlighted one — exercising the row-level rung of
+  // the three-level hover UX (table / row / cell).
+  const rowBbox = { l: 10, t: 100, r: 200, b: 80, coord_origin: "BOTTOMLEFT" };
+  const arrayExtraction = {
+    document_type: "Invoice",
+    document_description: "",
+    fields: [
+      {
+        name: "line_items",
+        type: "array",
+        description: "",
+        examples: [],
+        matched_entry_id: "array:line_items",
+        page: 1,
+        bbox: rowBbox,
+        items: [
+          {
+            matched_entry_id: 5,
+            page: 1,
+            bbox: rowBbox,
+            fields: [
+              {
+                name: "amount",
+                extracted_value: "10.72 EUR",
+                confidence: 0.85,
+                matched_entry_id: "cell:5:amount",
+                page: 1,
+                bbox: { l: 150, t: 100, r: 200, b: 80 },
+                match_reason: "column_header",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    target_tables: [],
+  };
+  const onHover = vi.fn();
+  render(
+    <FieldsPanel
+      extraction={arrayExtraction}
+      onHoverField={onHover}
+      loading={false}
+    />,
+  );
+  // Expand the array field so items render.
+  fireEvent.click(screen.getByTestId("field-line_items"));
+
+  const header = screen.getByTestId("array-item-header-line_items-0");
+  fireEvent.mouseEnter(header);
+  // The payload sent up is the row-level one — matched_entry_id is the
+  // integer row id, not the cell id.
+  expect(onHover).toHaveBeenCalledWith(
+    expect.objectContaining({ matched_entry_id: 5, bbox: rowBbox }),
+  );
+});
+
+
+test("renders refresh button when onRefresh is provided and fires it", () => {
+  const onRefresh = vi.fn();
+  render(
+    <FieldsPanel
+      extraction={mockExtraction}
+      onHoverField={() => {}}
+      onRefresh={onRefresh}
+      loading={false}
+    />,
+  );
+  const btn = screen.getByTestId("fields-panel-refresh");
+  fireEvent.click(btn);
+  expect(onRefresh).toHaveBeenCalledTimes(1);
+});
+
+test("hides refresh button when onRefresh is not provided", () => {
+  render(
+    <FieldsPanel
+      extraction={mockExtraction}
+      onHoverField={() => {}}
+      loading={false}
+    />,
+  );
+  expect(screen.queryByTestId("fields-panel-refresh")).toBeNull();
+});
+
 test("shows generic empty state when no document is selected", () => {
   render(
     <FieldsPanel extraction={null} onHoverField={() => {}} loading={false} />

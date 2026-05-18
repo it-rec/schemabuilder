@@ -281,10 +281,19 @@ export default function DocumentViewer({
                 type="button"
                 className={
                   "document-viewer__highlight" +
+                  (f.isCell ? " document-viewer__highlight--cell" : "") +
                   (isActive ? " document-viewer__highlight--active" : "")
                 }
                 data-testid={
-                  isActive ? "highlight-overlay" : `highlight-overlay-${f.key}`
+                  // Active overlay gets the short "highlight-overlay" testid
+                  // for ergonomic test queries — but only when it's the
+                  // primary. Additional overlays for the same field would
+                  // otherwise collide on that id (getByTestId throws on
+                  // duplicates), so they keep their unique per-key id even
+                  // while active.
+                  isActive && f.isPrimary !== false
+                    ? "highlight-overlay"
+                    : `highlight-overlay-${f.key}`
                 }
                 aria-label={`Highlight for ${f.label}`}
                 style={{
@@ -299,7 +308,7 @@ export default function DocumentViewer({
                 onFocus={() => onHoverField?.(f.field)}
                 onBlur={() => onHoverField?.(null)}
               >
-                {isActive && (
+                {isActive && f.isPrimary !== false && (
                   <span className="document-viewer__highlight-label">
                     {f.label}
                   </span>

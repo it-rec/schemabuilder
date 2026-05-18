@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   Theme,
   Header,
@@ -140,6 +140,11 @@ export default function App() {
   // teach. Bumping this is enough — the effect depends on `extractCycle`, so
   // it kicks off a fresh /extract that picks up the newly added example.
   const [extractCycle, setExtractCycle] = useState(0);
+  // Set to `true` for one extract cycle to bypass the backend's SQLite cache
+  // (the matcher result is keyed on (doc, definition); a code-side matcher
+  // change otherwise stays invisible until the cache is invalidated). A ref,
+  // not state, so consumption inside the effect doesn't itself retrigger.
+  const pendingExtractRefreshRef = useRef(false);
 
   // Load document list and definitions whenever a connection is (re)established.
   // Gated on `online === true` so we don't fire fetches before the first probe
@@ -233,7 +238,12 @@ export default function App() {
     // Drop any field highlight from the prior definition; its bbox refers to
     // a field object that no longer exists in the new extraction.
     setHighlightedField(null);
-    extractFields(selectedDocId, selectedDefId, { signal: ctrl.signal })
+    const refresh = pendingExtractRefreshRef.current;
+    pendingExtractRefreshRef.current = false;
+    extractFields(selectedDocId, selectedDefId, {
+      signal: ctrl.signal,
+      refresh,
+    })
       .then((data) => {
         if (!ctrl.signal.aborted) setExtraction(data);
       })
@@ -258,6 +268,15 @@ export default function App() {
 
   const handleDefChange = useCallback(({ selectedItem }) => {
     setSelectedDefId(selectedItem?.id || null);
+  }, []);
+
+  // Force a fresh /extract that bypasses the backend's SQLite cache. Needed
+  // when the matcher has changed on the server (deployed code / edited
+  // examples) but (doc, definition) would otherwise be a cache hit and
+  // return last week's result.
+  const handleRefreshExtraction = useCallback(() => {
+    pendingExtractRefreshRef.current = true;
+    setExtractCycle((c) => c + 1);
   }, []);
 
   // Re-fetch the definitions list after a save/delete so newly created classes
@@ -451,36 +470,102 @@ export default function App() {
   // collapse to one overlay per item (sub-fields of one row share the table-
   // cell bbox, so per-sub-field overlays would visually stack). `field` is the
   // payload sent back to onHoverField, so FieldsPanel can highlight the same
-  // row that DocumentViewer just lit up.
+  // row that DocumentViewer just lit up. Scalar fields may also carry
+  // `additional_bboxes` — every other place the same extracted value occurs;
+  // we emit one extra overlay per occurrence, sharing the field's
+  // matched_entry_id so hovering the field lights up every location at once.
   const extractedFields = useMemo(() => {
     if (!extraction?.fields) return [];
     const out = [];
     for (const f of extraction.fields) {
       if (f.matched_entry_id != null && f.bbox && f.page) {
+        const baseLabel = f.name.replace(/_/g, " ");
         out.push({
           key: `field.${f.name}`,
-          label: f.name.replace(/_/g, " "),
+          label: baseLabel,
+          isPrimary: true,
           matched_entry_id: f.matched_entry_id,
           page: f.page,
           bbox: f.bbox,
           field: f,
         });
+        if (Array.isArray(f.additional_bboxes)) {
+          f.additional_bboxes.forEach((ab, i) => {
+            if (!ab || !ab.bbox || !ab.page) return;
+            out.push({
+              key: `field.${f.name}.add.${i}`,
+              label: baseLabel,
+              isPrimary: false,
+              matched_entry_id: f.matched_entry_id,
+              page: ab.page,
+              bbox: ab.bbox,
+              field: f,
+            });
+          });
+        }
       }
       if (f.type === "array" && Array.isArray(f.items)) {
         f.items.forEach((item, idx) => {
-          const sub = item.fields?.find(
-            (sf) => sf.bbox && sf.page && sf.matched_entry_id != null,
-          );
-          if (sub) {
-            out.push({
+          // Prefer the item's own row-level geometry (whole line item). When
+          // it's missing (older backend, or a column-routed-only item with
+          // no row bbox in the entry) fall back to the first sub-field that
+          // has a bbox — that's the legacy path which kept things working
+          // before per-item geometry was added.
+          let rowEntry = null;
+          if (item.bbox && item.page && item.matched_entry_id != null) {
+            rowEntry = {
               key: `array.${f.name}.${idx}`,
               label: `${f.name.replace(/_/g, " ")} #${idx + 1}`,
-              matched_entry_id: sub.matched_entry_id,
-              page: sub.page,
-              bbox: sub.bbox,
-              field: sub,
-            });
+              matched_entry_id: item.matched_entry_id,
+              page: item.page,
+              bbox: item.bbox,
+              field: {
+                ...f,
+                matched_entry_id: item.matched_entry_id,
+                page: item.page,
+                bbox: item.bbox,
+              },
+            };
+          } else {
+            const sub = item.fields?.find(
+              (sf) => sf.bbox && sf.page && sf.matched_entry_id != null,
+            );
+            if (sub) {
+              rowEntry = {
+                key: `array.${f.name}.${idx}`,
+                label: `${f.name.replace(/_/g, " ")} #${idx + 1}`,
+                matched_entry_id: sub.matched_entry_id,
+                page: sub.page,
+                bbox: sub.bbox,
+                field: sub,
+              };
+            }
           }
+          if (rowEntry) out.push(rowEntry);
+
+          // Cell-level overlays for sub-fields that got column-routed (their
+          // matched_entry_id is a string "cell:<row>:<name>"). These are
+          // invisible until directly hovered (CSS opacity:0 on --cell), so
+          // they don't add visual clutter — only sub-field hover lights them.
+          item.fields?.forEach((sub) => {
+            if (
+              sub &&
+              sub.bbox &&
+              sub.page &&
+              typeof sub.matched_entry_id === "string" &&
+              sub.matched_entry_id.startsWith("cell:")
+            ) {
+              out.push({
+                key: `cell.${f.name}.${idx}.${sub.name}`,
+                label: `${sub.name.replace(/_/g, " ")}`,
+                isCell: true,
+                matched_entry_id: sub.matched_entry_id,
+                page: sub.page,
+                bbox: sub.bbox,
+                field: sub,
+              });
+            }
+          });
         });
       }
     }
@@ -515,8 +600,39 @@ export default function App() {
         <div className="app-layout">
           <aside
             className="app-layout__sidebar"
-            aria-label="Documents and document class"
+            aria-label="Documents"
             data-testid="document-list-panel"
+          >
+            <DocumentList
+              documents={documents}
+              selectedId={selectedDocId}
+              onSelect={handleSelect}
+              onUpload={handleUploadDocuments}
+              onDelete={handleDeleteDocument}
+              onRunBatch={selectedDefId ? handleRunBatch : null}
+              uploading={uploading}
+            />
+          </aside>
+          <main
+            className="app-layout__main"
+            aria-label="Document viewer"
+            data-testid="document-viewer-panel"
+          >
+            <DocumentViewer
+              docId={selectedDocId}
+              documentData={viewerData}
+              highlightedField={highlightedField}
+              onHoverField={handleHoverField}
+              onTeachEntry={selectedDefId ? handleTeachEntry : null}
+              textEntries={extraction?.text_entries}
+              extractedFields={extractedFields}
+              loading={loading}
+            />
+          </main>
+          <aside
+            className="app-layout__panel"
+            aria-label="Document class and extracted fields"
+            data-testid="fields-panel"
           >
             <div className="definition-selector">
               <Dropdown
@@ -551,41 +667,13 @@ export default function App() {
                 </Button>
               </div>
             </div>
-            <DocumentList
-              documents={documents}
-              selectedId={selectedDocId}
-              onSelect={handleSelect}
-              onUpload={handleUploadDocuments}
-              onDelete={handleDeleteDocument}
-              onRunBatch={selectedDefId ? handleRunBatch : null}
-              uploading={uploading}
-            />
-          </aside>
-          <main
-            className="app-layout__main"
-            aria-label="Document viewer"
-            data-testid="document-viewer-panel"
-          >
-            <DocumentViewer
-              docId={selectedDocId}
-              documentData={viewerData}
-              highlightedField={highlightedField}
-              onHoverField={handleHoverField}
-              onTeachEntry={selectedDefId ? handleTeachEntry : null}
-              textEntries={extraction?.text_entries}
-              extractedFields={extractedFields}
-              loading={loading}
-            />
-          </main>
-          <aside
-            className="app-layout__panel"
-            aria-label="Extracted fields"
-            data-testid="fields-panel"
-          >
             <FieldsPanel
               extraction={extraction}
               onHoverField={handleHoverField}
               onExport={handleExport}
+              onRefresh={
+                selectedDocId && selectedDefId ? handleRefreshExtraction : null
+              }
               highlightedField={highlightedField}
               loading={loading || extracting}
               hasDocument={!!selectedDocId}
