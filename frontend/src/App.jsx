@@ -43,16 +43,36 @@ export default function App() {
   const [documents, setDocuments] = useState([]);
   const [selectedDocId, setSelectedDocId] = useState(null);
   const [documentData, setDocumentData] = useState(null);
-  const [loading, setLoading] = useState(false);
 
   // Document definitions
   const [definitions, setDefinitions] = useState([]);
   const [selectedDefId, setSelectedDefId] = useState(null);
   const [extraction, setExtraction] = useState(null);
-  const [extracting, setExtracting] = useState(false);
 
   // Highlighted field (for document overlay)
   const [highlightedField, setHighlightedField] = useState(null);
+
+  // `loading` / `extracting` are derived from "we want this data but don't
+  // have it yet" rather than tracked as separate state. The store-previous
+  // blocks below null out the stale data the moment its identifying input
+  // changes, so these expressions flip true immediately on selection
+  // change and back to false the moment the new fetch lands.
+  //
+  // Trade-off: a silent fetch failure (5xx / network error not surfaced
+  // via the catch block) leaves documentData null and the spinner
+  // visible until the user picks a different doc. The original code's
+  // .finally(setLoading(false)) hid that stuck-state. We accept the
+  // regression because the broader OfflineOverlay already covers the
+  // common "backend unreachable" case, and silent 4xx/5xx for a
+  // specific doc id is rare in practice.
+  const loading =
+    online === true && !!selectedDocId && documentData == null;
+  const extracting =
+    online === true &&
+    !!selectedDocId &&
+    !!selectedDefId &&
+    documentData != null &&
+    extraction == null;
 
   // Definition editor modal — `editorMode` is null when closed, else "create" or
   // "edit". Tracking the mode separately from `open` keeps the modal's body
@@ -175,6 +195,33 @@ export default function App() {
     return () => ctrl.abort();
   }, [online, reloadKey]);
 
+  // Reset doc-scoped state the moment the selection changes — done during
+  // render via the store-previous-prop pattern instead of in the doc-load
+  // effect, so the change rides the same commit that surfaced the new
+  // selection (no flash of stale data before the effect catches up).
+  const [prevSelectedDocId, setPrevSelectedDocId] = useState(selectedDocId);
+  if (prevSelectedDocId !== selectedDocId) {
+    setPrevSelectedDocId(selectedDocId);
+    setDocumentData(null);
+    setExtraction(null);
+    setHighlightedField(null);
+  }
+
+  // Same pattern for the definition selection and the teach/restore
+  // refetch counter — both invalidate the extraction (but not the loaded
+  // document) and the highlighted field that lived inside it.
+  const [prevSelectedDefId, setPrevSelectedDefId] = useState(selectedDefId);
+  const [prevExtractCycle, setPrevExtractCycle] = useState(extractCycle);
+  if (
+    prevSelectedDefId !== selectedDefId ||
+    prevExtractCycle !== extractCycle
+  ) {
+    setPrevSelectedDefId(selectedDefId);
+    setPrevExtractCycle(extractCycle);
+    setExtraction(null);
+    setHighlightedField(null);
+  }
+
   // Load document data when selection changes. AbortController kills the
   // in-flight metadata fetch when the user switches docs again before it
   // resolves — saves backend cycles vs. the prior `cancelled` flag, which
@@ -182,10 +229,6 @@ export default function App() {
   useEffect(() => {
     if (!selectedDocId || online !== true) return;
     const ctrl = new AbortController();
-    setLoading(true);
-    setDocumentData(null);
-    setExtraction(null);
-    setHighlightedField(null);
 
     // Kick page-1 (and a low-priority page-2) image fetches off in parallel
     // with metadata. The metadata request also triggers backend prefetch
@@ -208,9 +251,6 @@ export default function App() {
       })
       .catch((err) => {
         if (err?.name !== "AbortError") console.error(err);
-      })
-      .finally(() => {
-        if (!ctrl.signal.aborted) setLoading(false);
       });
     return () => {
       ctrl.abort();
@@ -228,20 +268,12 @@ export default function App() {
   useEffect(() => {
     if (!selectedDocId || !selectedDefId || !documentData || online !== true) return;
     const ctrl = new AbortController();
-    setExtracting(true);
-    setExtraction(null);
-    // Drop any field highlight from the prior definition; its bbox refers to
-    // a field object that no longer exists in the new extraction.
-    setHighlightedField(null);
     extractFields(selectedDocId, selectedDefId, { signal: ctrl.signal })
       .then((data) => {
         if (!ctrl.signal.aborted) setExtraction(data);
       })
       .catch((err) => {
         if (err?.name !== "AbortError") console.error(err);
-      })
-      .finally(() => {
-        if (!ctrl.signal.aborted) setExtracting(false);
       });
     return () => ctrl.abort();
     // extractCycle is in the dep list so a successful teach can force a
