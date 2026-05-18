@@ -116,6 +116,19 @@ Use `npm ci`, not `npm install`. `package-lock.json` is the contract; `npm ci`
 gives a reproducible tree and is what CI uses. If `node_modules/` is empty,
 **every** command below fails with cryptic errors — install first.
 
+A `postinstall` step runs `patch-package` to apply the diffs under
+`frontend/patches/`. Today there's one: `eslint-plugin-react+7.37.5.patch`
+fixes the `context.getFilename()` call that ESLint 10 removed (tracked
+upstream as [jsx-eslint/eslint-plugin-react#3977](https://github.com/jsx-eslint/eslint-plugin-react/issues/3977)).
+The matching `npm overrides` in `package.json` widen its (and
+`eslint-plugin-jsx-a11y`'s) peer range to allow eslint 10 in the first
+place. **Drop both the patch and the overrides once those plugins ship
+eslint-10-compatible releases**, then bump them past the broken
+versions. If you bump `eslint-plugin-react` past 7.37.5, the patch will
+fail to apply — `patch-package` exits non-zero and `npm ci` fails — at
+which point either the upstream is fixed (delete the patch) or it
+isn't (regenerate the patch against the new version).
+
 ### Tests
 
 ```bash
