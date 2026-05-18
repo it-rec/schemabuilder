@@ -488,13 +488,16 @@ export default function App() {
   }, [extraction]);
 
   const offline = online !== true;
-  // React 19 accepts `inert` as a boolean attribute. Apply it to the entire
-  // app shell whenever we're not confirmed online so keyboard / pointer /
-  // screen-reader interaction is blocked while the overlay is up. The overlay
-  // sits outside the inert subtree so its retry button stays operable.
+  // React 19 accepts `inert` as a boolean attribute, but only when the
+  // prop value is strictly truthy and non-string — passing `""` is
+  // treated as the empty/falsy case and the attribute is removed. Use
+  // the boolean directly so the rendered HTML actually carries `inert`
+  // while we're offline, keeping keyboard / pointer / screen-reader
+  // interaction blocked beneath the overlay. The overlay sits outside
+  // the inert subtree so its retry indicator stays operable.
   return (
     <Theme theme={theme}>
-      <div className="app-shell" inert={offline ? "" : undefined}>
+      <div className="app-shell" inert={offline || undefined}>
       <Header aria-label="Schema Builder">
         <HeaderName prefix="" href="#" onClick={(e) => e.preventDefault()}>
           Schema Builder

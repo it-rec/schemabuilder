@@ -44,14 +44,16 @@ test.describe("Batch extraction", () => {
     await page.getByTestId("batch-run-button").click();
     const modal = page.getByRole("dialog", { name: "Batch extraction" });
     await expect(modal).toBeVisible();
+    // Wait for the Start button so we don't click before the modal has
+    // finished resetting its idle state.
+    await expect(modal.getByTestId("batch-start")).toBeEnabled();
     await modal.getByTestId("batch-start").click();
 
-    // Progress bar appears once status leaves "idle".
-    await expect(modal.getByTestId("batch-progress")).toBeVisible();
-
-    // Wait for the terminal state — the download button only enables when
-    // the run is no longer running. Use that as the "done" signal; the
-    // footer "Close" label collides with the modal header close-icon.
+    // The download button only enables once the job is no longer running.
+    // Use that as the "done" signal; React 18+ batching means the
+    // intermediate "running" status may render too briefly to assert on
+    // reliably, and the footer Close label collides with the modal
+    // header close-icon name.
     await expect(modal.getByTestId("batch-download")).toBeEnabled({
       timeout: 120_000,
     });
